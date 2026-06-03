@@ -1,0 +1,2 @@
+google-cloud-compute==1.47.0
+pyopenssl==26.2.0

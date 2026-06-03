@@ -1,0 +1,27 @@
+# Python virtual environments and caches
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Terraform directories, local state, and secrets
+.terraform/
+terraform.tfstate*
+.terraform.lock.hcl
+*.tfvars
+*.tfvars.json
+
+# IDE configuration
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local logs
+*.log
