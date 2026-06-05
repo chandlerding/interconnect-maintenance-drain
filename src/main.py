@@ -41,10 +41,6 @@ def process_maintenance_events(
     while executing slow Cloud Router PATCH write operations concurrently, capped at 4 writes max.
     Guarantees no race conditions on Cloud Routers using a Unified Router Ledger pattern.
     """
-    global IMPORT_POLICY_NAME, EXPORT_POLICY_NAME
-    IMPORT_POLICY_NAME = f"{POLICY_PREFIX}import"
-    EXPORT_POLICY_NAME = f"{POLICY_PREFIX}export"
-
     logging.info(f"Maintenance Events Check Loop Started at {datetime.now(timezone.utc).isoformat()}")
     
     projects_to_use = target_projects if target_projects else INTERCONNECT_PROJECTS
@@ -53,7 +49,7 @@ def process_maintenance_events(
         logging.error(error_msg)
         raise ValueError(error_msg)
 
-    project_list = [p.strip() for p in projects_to_use.split(",") if p.strip()]
+    project_list = list(dict.fromkeys(p.strip() for p in projects_to_use.split(",") if p.strip()))
     logging.info(f"Targeted networks maintenance events check scoped to project list: {project_list}")
     
     # 1. Audit Phase: Scan all projects and build the routing alignment ledger
@@ -93,8 +89,8 @@ def process_interconnect_maintenance_events(
     # 1. Inspect planned expectedOutages to identify if a drain window is active
     for outage in outages:
          state = outage.state
-         start_time = parse_rfc3339(outage.start_time)
-         end_time = parse_rfc3339(outage.end_time)
+         start_time = parse_epoch_ms(outage.start_time)
+         end_time = parse_epoch_ms(outage.end_time)
 
          if not start_time or not end_time:
               logging.warning(f"Outage notification {outage.name} contains invalid time format. Skipping.")
@@ -174,6 +170,10 @@ def check_current_bgp_states(attachments: list, router_cache: dict) -> list:
              proj, region, name = parse_attachment_url(attach_url)
              attach_data = attachments_client.get(project=proj, region=region, interconnect_attachment=name)
              router_url = attach_data.router
+             if not router_url:
+                  logging.warning(f"VLAN attachment {name} has no associated Cloud Router. Skipping.")
+                  continue
+             
              router_name = router_url.split("/")[-1]
              
              cache_key = (proj, region, router_name)
@@ -243,7 +243,10 @@ def safely_patch_router(router_key: tuple, peer_mods: list):
               router = local_routers_client.get(project=proj, region=region, router=router_name)
               
               # 2. Ensure GCI drain route policies exist globally in GCP for this router
-              ensure_drain_policies_exist(proj, region, router, local_routers_client)
+              policies_patched = ensure_drain_policies_exist(proj, region, router, local_routers_client)
+              
+              if policies_patched:
+                   router = local_routers_client.get(project=proj, region=region, router=router_name)
               
               # 3. Apply the BGP peer modifications atomically to the fresh router object
               for mod in peer_mods:
@@ -295,7 +298,7 @@ def safely_patch_router(router_key: tuple, peer_mods: list):
          except Exception as e:
               raise RuntimeError(f"CRITICAL: Non-retryable error applying patch to Router {router_name}: {e}")
 
-def ensure_drain_policies_exist(project_id: str, region: str, router: compute_v1.Router, routers_client) -> None:
+def ensure_drain_policies_exist(project_id: str, region: str, router: compute_v1.Router, routers_client) -> bool:
     import_policy_name = IMPORT_POLICY_NAME
     export_policy_name = EXPORT_POLICY_NAME
     wildcard_match_expr = "destination.inAnyRange([prefix('0.0.0.0/0').orLonger(), prefix('::/0').orLonger()])"
@@ -340,7 +343,7 @@ def ensure_drain_policies_exist(project_id: str, region: str, router: compute_v1
         return term_actions == expected_actions
 
     # Helper to create/patch policy
-    def upsert_policy(name, policy_type, expected_actions, existing_policy):
+    def upsert_policy(name, policy_type, expected_actions, existing_policy) -> bool:
         action_exprs = [compute_v1.Expr(expression=act) for act in expected_actions]
         match_expr = compute_v1.Expr(expression=wildcard_match_expr)
 
@@ -385,15 +388,19 @@ def ensure_drain_policies_exist(project_id: str, region: str, router: compute_v1
                 logging.info(f"UPDATE route policy '{name}' operation '{operation.name}' dispatched. Waiting...")
                 operation.result()
                 logging.info(f"UPDATE route policy '{name}' completed successfully.")
+                return True
             except Exception as e:
                 logging.error(f"Failed to update route policy '{name}' on router {router.name}: {e}")
                 raise
+        return False
 
     # Reconcile import policy
-    upsert_policy(import_policy_name, "ROUTE_POLICY_TYPE_IMPORT", expected_import_actions, import_policy)
+    import_patched = upsert_policy(import_policy_name, "ROUTE_POLICY_TYPE_IMPORT", expected_import_actions, import_policy)
 
     # Reconcile export policy
-    upsert_policy(export_policy_name, "ROUTE_POLICY_TYPE_EXPORT", expected_export_actions, export_policy)
+    export_patched = upsert_policy(export_policy_name, "ROUTE_POLICY_TYPE_EXPORT", expected_export_actions, export_policy)
+
+    return import_patched or export_patched
 
 
 
@@ -557,7 +564,7 @@ def _evaluate_and_consolidate(run_summary: list, routers_to_align: dict) -> dict
          else:
               record["action"] = "NO_ACTION"
               record["status"] = "SUCCESS"
-         
+          
          del record["_peer_targets"]
          
     return filtered_routers_to_align
@@ -627,27 +634,13 @@ def is_peer_aligned(target_state: str, is_drained: bool) -> bool:
 
 # --- UTILS & FORMATTERS ---
 
-def parse_rfc3339(ts_val) -> datetime:
-    """Parses standard API timestamp formats (RFC3339 strings or epoch milliseconds) using robust, version-safe native parsing."""
+def parse_epoch_ms(ts_val) -> datetime:
+    """Parses standard API timestamp formats (epoch milliseconds) using native parsing."""
     if not ts_val:
          return None
     try:
-         # If it's already an integer or float, treat it as epoch milliseconds
-         if isinstance(ts_val, (int, float)):
-              return datetime.fromtimestamp(ts_val / 1000.0, tz=timezone.utc)
-         
-         # If it's a string, try to parse it
-         if isinstance(ts_val, str):
-              # Check if the string is actually an integer (e.g. "1776735000000")
-              if ts_val.isdigit():
-                   return datetime.fromtimestamp(int(ts_val) / 1000.0, tz=timezone.utc)
-              
-              # Robust timezone fallback: safely maps 'Z' suffix in Python < 3.11 environments
-              clean_ts = ts_val[:-1] + "+00:00" if ts_val.endswith("Z") else ts_val
-              return datetime.fromisoformat(clean_ts)
-              
-         raise TypeError(f"Unsupported timestamp type: {type(ts_val)}")
-    except Exception as e:
+         return datetime.fromtimestamp(int(ts_val) / 1000.0, tz=timezone.utc)
+    except (ValueError, TypeError) as e:
          raise ValueError(f"CRITICAL: Unable to parse maintenance timestamp '{ts_val}'. Schema may have changed: {e}")
 
 def parse_attachment_url(url: str) -> (str, str, str):

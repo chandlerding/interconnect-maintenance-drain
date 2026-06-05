@@ -64,8 +64,9 @@ Because the Cloud Run Job requires the container image to exist during deploymen
 
 ### Phase 1: Bootstrap the Repository and APIs
 
-1.  Initialize Terraform:
+1.  Change to the terraform directory and initialize Terraform:
     ```bash
+    cd terraform
     terraform init
     ```
 2.  Deploy **only** the APIs and the Artifact Registry repository:
@@ -77,14 +78,16 @@ Because the Cloud Run Job requires the container image to exist during deploymen
 
 ### Phase 2: Build, Push, and Deploy
 
-1.  Build the Docker image and push it to the newly created repository using Cloud Build:
+1.  Change back to the project root directory, build the Docker image, and push it to the newly created repository using Cloud Build:
     ```bash
+    cd ..
     gcloud builds submit --tag us-central1-docker.pkg.dev/YOUR_OPS_PROJECT_ID/ic-drain-repo/orchestrator:latest src
     ```
     *(Replace `YOUR_OPS_PROJECT_ID`, `ic-drain-repo`, and `orchestrator` with your configured variables).*
 
-2.  Deploy the remaining resources (Cloud Run Job, Cloud Scheduler, and IAM permissions):
+2.  Change back to the terraform directory and deploy the remaining resources (Cloud Run Job, Cloud Scheduler, and IAM permissions):
     ```bash
+    cd terraform
     terraform apply
     ```
 

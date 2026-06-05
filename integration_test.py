@@ -25,8 +25,8 @@ class InterconnectMaintenanceIntegrationTest(unittest.TestCase):
         outage = MagicMock()
         outage.name = "outage-1"
         outage.state = "ACTIVE"
-        outage.start_time = (now - timedelta(minutes=5)).isoformat()
-        outage.end_time = (now + timedelta(minutes=55)).isoformat()
+        outage.start_time = int((now - timedelta(minutes=5)).timestamp() * 1000)
+        outage.end_time = int((now + timedelta(minutes=55)).timestamp() * 1000)
         ic_m.expected_outages = [outage]
         ic_m.interconnect_attachments = [
             f"/projects/{project_id}/regions/{region}/interconnectAttachments/at-maintenance"

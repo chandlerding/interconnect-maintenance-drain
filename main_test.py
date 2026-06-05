@@ -3,35 +3,25 @@ from datetime import datetime, timezone, timedelta
 from unittest.mock import patch, MagicMock
 from src import main
 
-class TestParseRFC3339(unittest.TestCase):
-
-    def test_parse_valid_rfc3339_string_z(self):
-        ts = "2026-06-03T01:37:17Z"
-        expected = datetime(2026, 6, 3, 1, 37, 17, tzinfo=timezone.utc)
-        self.assertEqual(main.parse_rfc3339(ts), expected)
-
-    def test_parse_valid_rfc3339_string_timezone(self):
-        ts = "2026-06-03T01:37:17+02:00"
-        expected = datetime(2026, 6, 3, 1, 37, 17, tzinfo=timezone(timedelta(hours=2)))
-        self.assertEqual(main.parse_rfc3339(ts), expected)
+class TestParseEpochMs(unittest.TestCase):
 
     def test_parse_epoch_milliseconds_int(self):
         ts = 1776735000000
         expected = datetime(2026, 4, 21, 1, 30, 0, tzinfo=timezone.utc)
-        self.assertEqual(main.parse_rfc3339(ts), expected)
+        self.assertEqual(main.parse_epoch_ms(ts), expected)
 
     def test_parse_epoch_milliseconds_str(self):
         ts = "1776735000000"
         expected = datetime(2026, 4, 21, 1, 30, 0, tzinfo=timezone.utc)
-        self.assertEqual(main.parse_rfc3339(ts), expected)
+        self.assertEqual(main.parse_epoch_ms(ts), expected)
 
     def test_parse_empty_value(self):
-        self.assertIsNone(main.parse_rfc3339(None))
-        self.assertIsNone(main.parse_rfc3339(""))
+        self.assertIsNone(main.parse_epoch_ms(None))
+        self.assertIsNone(main.parse_epoch_ms(""))
 
     def test_parse_invalid_format(self):
         with self.assertRaises(ValueError):
-            main.parse_rfc3339("invalid-date")
+            main.parse_epoch_ms("invalid-date")
 
 class TestIsPeerAligned(unittest.TestCase):
     def test_aligned_drained(self):
@@ -204,8 +194,8 @@ class TestProcessInterconnectMaintenanceEvents(unittest.TestCase):
         mock_outage.name = "out1"
         mock_outage.state = "ACTIVE"
         now = datetime.now(timezone.utc)
-        mock_outage.start_time = (now - timedelta(minutes=10)).isoformat()
-        mock_outage.end_time = (now + timedelta(minutes=50)).isoformat()
+        mock_outage.start_time = int((now - timedelta(minutes=10)).timestamp() * 1000)
+        mock_outage.end_time = int((now + timedelta(minutes=50)).timestamp() * 1000)
         mock_ic.expected_outages = [mock_outage]
         mock_ic.interconnect_attachments = ["/projects/p1/regions/r1/interconnectAttachments/at1"]
         
@@ -229,8 +219,8 @@ class TestProcessInterconnectMaintenanceEvents(unittest.TestCase):
         mock_outage.name = "out1"
         mock_outage.state = "ACTIVE"
         now = datetime.now(timezone.utc)
-        mock_outage.start_time = (now + timedelta(minutes=30)).isoformat()
-        mock_outage.end_time = (now + timedelta(minutes=90)).isoformat()
+        mock_outage.start_time = int((now + timedelta(minutes=30)).timestamp() * 1000)
+        mock_outage.end_time = int((now + timedelta(minutes=90)).timestamp() * 1000)
         mock_ic.expected_outages = [mock_outage]
         mock_ic.interconnect_attachments = ["/projects/p1/regions/r1/interconnectAttachments/at1"]
         
@@ -251,8 +241,8 @@ class TestProcessInterconnectMaintenanceEvents(unittest.TestCase):
         mock_outage.name = "out1"
         mock_outage.state = "ACTIVE"
         now = datetime.now(timezone.utc)
-        mock_outage.start_time = (now + timedelta(minutes=120)).isoformat()
-        mock_outage.end_time = (now + timedelta(minutes=180)).isoformat()
+        mock_outage.start_time = int((now + timedelta(minutes=120)).timestamp() * 1000)
+        mock_outage.end_time = int((now + timedelta(minutes=180)).timestamp() * 1000)
         mock_ic.expected_outages = [mock_outage]
         mock_ic.interconnect_attachments = ["/projects/p1/regions/r1/interconnectAttachments/at1"]
         
