@@ -1,6 +1,7 @@
 import unittest
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch, MagicMock
+from google.cloud import compute_v1
 from src import main
 
 class TestParseEpochMs(unittest.TestCase):
@@ -113,8 +114,7 @@ class TestAuditProjects(unittest.TestCase):
     @patch('src.main.interconnects_client')
     @patch('src.main.process_interconnect_maintenance_events')
     def test_audit_success(self, mock_process, mock_ic_client):
-        mock_ic = MagicMock()
-        mock_ic.name = "ic1"
+        mock_ic = compute_v1.Interconnect(name="ic1")
         mock_ic_client.list.return_value = [mock_ic]
 
         mock_process.return_value = (
@@ -170,10 +170,11 @@ class TestProcessMaintenanceEvents(unittest.TestCase):
 class TestProcessInterconnectMaintenanceEvents(unittest.TestCase):
     @patch('src.main.check_current_bgp_states')
     def test_no_outages(self, mock_check_bgp):
-        mock_ic = MagicMock()
-        mock_ic.name = "ic1"
-        mock_ic.expected_outages = []
-        mock_ic.interconnect_attachments = ["/projects/p1/regions/r1/interconnectAttachments/at1"]
+        mock_ic = compute_v1.Interconnect(
+            name="ic1",
+            expected_outages=[],
+            interconnect_attachments=["/projects/p1/regions/r1/interconnectAttachments/at1"]
+        )
 
         mock_check_bgp.return_value = [
             {"project_id": "p1", "region": "r1", "router_name": "rt1", "peer_name": "gp1", "is_drained": False}
@@ -188,17 +189,18 @@ class TestProcessInterconnectMaintenanceEvents(unittest.TestCase):
 
     @patch('src.main.check_current_bgp_states')
     def test_active_outage(self, mock_check_bgp):
-        mock_ic = MagicMock()
-        mock_ic.name = "ic1"
-
-        mock_outage = MagicMock()
-        mock_outage.name = "out1"
-        mock_outage.state = "ACTIVE"
         now = datetime.now(timezone.utc)
-        mock_outage.start_time = int((now - timedelta(minutes=10)).timestamp() * 1000)
-        mock_outage.end_time = int((now + timedelta(minutes=50)).timestamp() * 1000)
-        mock_ic.expected_outages = [mock_outage]
-        mock_ic.interconnect_attachments = ["/projects/p1/regions/r1/interconnectAttachments/at1"]
+        mock_outage = compute_v1.InterconnectOutageNotification(
+            name="out1",
+            state="ACTIVE",
+            start_time=int((now - timedelta(minutes=10)).timestamp() * 1000),
+            end_time=int((now + timedelta(minutes=50)).timestamp() * 1000)
+        )
+        mock_ic = compute_v1.Interconnect(
+            name="ic1",
+            expected_outages=[mock_outage],
+            interconnect_attachments=["/projects/p1/regions/r1/interconnectAttachments/at1"]
+        )
 
         mock_check_bgp.return_value = [
             {"project_id": "p1", "region": "r1", "router_name": "rt1", "peer_name": "gp1", "is_drained": False}
@@ -213,17 +215,18 @@ class TestProcessInterconnectMaintenanceEvents(unittest.TestCase):
 
     @patch('src.main.check_current_bgp_states')
     def test_imminent_outage(self, mock_check_bgp):
-        mock_ic = MagicMock()
-        mock_ic.name = "ic1"
-
-        mock_outage = MagicMock()
-        mock_outage.name = "out1"
-        mock_outage.state = "ACTIVE"
         now = datetime.now(timezone.utc)
-        mock_outage.start_time = int((now + timedelta(minutes=30)).timestamp() * 1000)
-        mock_outage.end_time = int((now + timedelta(minutes=90)).timestamp() * 1000)
-        mock_ic.expected_outages = [mock_outage]
-        mock_ic.interconnect_attachments = ["/projects/p1/regions/r1/interconnectAttachments/at1"]
+        mock_outage = compute_v1.InterconnectOutageNotification(
+            name="out1",
+            state="ACTIVE",
+            start_time=int((now + timedelta(minutes=30)).timestamp() * 1000),
+            end_time=int((now + timedelta(minutes=90)).timestamp() * 1000)
+        )
+        mock_ic = compute_v1.Interconnect(
+            name="ic1",
+            expected_outages=[mock_outage],
+            interconnect_attachments=["/projects/p1/regions/r1/interconnectAttachments/at1"]
+        )
 
         mock_check_bgp.return_value = [
             {"project_id": "p1", "region": "r1", "router_name": "rt1", "peer_name": "gp1", "is_drained": False}
@@ -235,17 +238,18 @@ class TestProcessInterconnectMaintenanceEvents(unittest.TestCase):
 
     @patch('src.main.check_current_bgp_states')
     def test_future_outage_not_imminent(self, mock_check_bgp):
-        mock_ic = MagicMock()
-        mock_ic.name = "ic1"
-
-        mock_outage = MagicMock()
-        mock_outage.name = "out1"
-        mock_outage.state = "ACTIVE"
         now = datetime.now(timezone.utc)
-        mock_outage.start_time = int((now + timedelta(minutes=120)).timestamp() * 1000)
-        mock_outage.end_time = int((now + timedelta(minutes=180)).timestamp() * 1000)
-        mock_ic.expected_outages = [mock_outage]
-        mock_ic.interconnect_attachments = ["/projects/p1/regions/r1/interconnectAttachments/at1"]
+        mock_outage = compute_v1.InterconnectOutageNotification(
+            name="out1",
+            state="ACTIVE",
+            start_time=int((now + timedelta(minutes=120)).timestamp() * 1000),
+            end_time=int((now + timedelta(minutes=180)).timestamp() * 1000)
+        )
+        mock_ic = compute_v1.Interconnect(
+            name="ic1",
+            expected_outages=[mock_outage],
+            interconnect_attachments=["/projects/p1/regions/r1/interconnectAttachments/at1"]
+        )
 
         mock_check_bgp.return_value = [
             {"project_id": "p1", "region": "r1", "router_name": "rt1", "peer_name": "gp1", "is_drained": False}

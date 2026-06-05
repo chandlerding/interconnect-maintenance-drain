@@ -11,141 +11,176 @@ class InterconnectMaintenanceIntegrationTest(unittest.TestCase):
     @patch('src.main.get_routers_client') # Used in safely_patch_router
     @patch('src.main.routers_client')     # Used in check_current_bgp_states
     def test_maintenance_simulation(self, mock_routers_client_global, mock_get_routers_client, mock_attachments_client, mock_ic_client):
-        """Simulates a maintenance event on one interconnect and verifies routing updates."""
+        """Simulates maintenance events across multiple interconnects and projects, verifying routing updates using concrete compute_v1 models."""
         
         # 1. Setup Mock Topology & Resource States
         project_id = "test-project"
+        project_id_2 = "other-project"
         region = "us-central1"
         now = datetime.now(timezone.utc)
 
+        def create_outage(state, minutes_offset_start, minutes_offset_end):
+            return compute_v1.InterconnectOutageNotification(
+                name=f"outage-{minutes_offset_start}",
+                state=state,
+                start_time=int((now + timedelta(minutes=minutes_offset_start)).timestamp() * 1000),
+                end_time=int((now + timedelta(minutes=minutes_offset_end)).timestamp() * 1000)
+            )
+
         # --- Interconnects ---
-        # IC 1: Under maintenance
-        ic_m = MagicMock()
-        ic_m.name = "ic-maintenance"
-        outage = MagicMock()
-        outage.name = "outage-1"
-        outage.state = "ACTIVE"
-        outage.start_time = int((now - timedelta(minutes=5)).timestamp() * 1000)
-        outage.end_time = int((now + timedelta(minutes=55)).timestamp() * 1000)
-        ic_m.expected_outages = [outage]
-        ic_m.interconnect_attachments = [
-            f"/projects/{project_id}/regions/{region}/interconnectAttachments/at-maintenance"
-        ]
+        ic_m = compute_v1.Interconnect(
+            name="ic-maintenance",
+            expected_outages=[create_outage("ACTIVE", -5, 55)],
+            interconnect_attachments=[f"/projects/{project_id}/regions/{region}/interconnectAttachments/at-maintenance"]
+        )
 
-        # IC 2: Stable
-        ic_s = MagicMock()
-        ic_s.name = "ic-stable"
-        ic_s.expected_outages = []
-        ic_s.interconnect_attachments = [
-            f"/projects/{project_id}/regions/{region}/interconnectAttachments/at-stable"
-        ]
+        ic_s = compute_v1.Interconnect(
+            name="ic-stable",
+            expected_outages=[],
+            interconnect_attachments=[f"/projects/{project_id}/regions/{region}/interconnectAttachments/at-stable"]
+        )
 
-        mock_ic_client.list.return_value = [ic_m, ic_s]
+        ic_r = compute_v1.Interconnect(
+            name="ic-recovered",
+            expected_outages=[],
+            interconnect_attachments=[f"/projects/{project_id}/regions/{region}/interconnectAttachments/at-recovered"]
+        )
+
+        ic_na = compute_v1.Interconnect(
+            name="ic-no-attachments",
+            expected_outages=[create_outage("ACTIVE", -5, 55)],
+            interconnect_attachments=[]
+        )
+
+        ic_nbgp = compute_v1.Interconnect(
+            name="ic-no-bgp",
+            expected_outages=[create_outage("ACTIVE", -5, 55)],
+            interconnect_attachments=[f"/projects/{project_id}/regions/{region}/interconnectAttachments/at-no-bgp"]
+        )
+
+        ic_cp = compute_v1.Interconnect(
+            name="ic-cross-project",
+            expected_outages=[create_outage("ACTIVE", -5, 55)],
+            interconnect_attachments=[f"/projects/{project_id_2}/regions/{region}/interconnectAttachments/at-cross-project"]
+        )
+
+        def list_interconnects(project):
+            if project == project_id:
+                return [ic_m, ic_s, ic_r, ic_na, ic_nbgp]
+            elif project == project_id_2:
+                return [ic_cp]
+            return []
+        mock_ic_client.list.side_effect = list_interconnects
 
         # --- VLAN Attachments ---
-        at_m = MagicMock()
-        at_m.name = "at-maintenance"
-        at_m.router = f"/projects/{project_id}/regions/{region}/routers/router-maintenance"
-
-        at_s = MagicMock()
-        at_s.name = "at-stable"
-        at_s.router = f"/projects/{project_id}/regions/{region}/routers/router-stable"
+        attachments = {
+            "at-maintenance": f"/projects/{project_id}/regions/{region}/routers/router-maintenance",
+            "at-stable": f"/projects/{project_id}/regions/{region}/routers/router-stable",
+            "at-recovered": f"/projects/{project_id}/regions/{region}/routers/router-recovered",
+            "at-no-bgp": f"/projects/{project_id}/regions/{region}/routers/router-no-bgp",
+            "at-cross-project": f"/projects/{project_id_2}/regions/{region}/routers/router-cross-project",
+        }
 
         def get_attachment(project, region, interconnect_attachment):
-            if interconnect_attachment == "at-maintenance":
-                return at_m
-            elif interconnect_attachment == "at-stable":
-                return at_s
+            if interconnect_attachment in attachments:
+                return compute_v1.InterconnectAttachment(
+                    name=interconnect_attachment,
+                    router=attachments[interconnect_attachment]
+                )
             raise ValueError(f"Unknown attachment {interconnect_attachment}")
         mock_attachments_client.get.side_effect = get_attachment
 
         # --- Cloud Routers ---
-        # Router for IC under maintenance
-        r_m = MagicMock()
-        r_m.name = "router-maintenance"
-        r_m.bgp.asn = 64512
-        
-        if_m = MagicMock()
-        if_m.name = "if-m"
-        if_m.linked_interconnect_attachment = f".../interconnectAttachments/at-maintenance"
-        r_m.interfaces = [if_m]
-        
-        peer_m = MagicMock()
-        peer_m.name = "peer-m"
-        peer_m.interface_name = "if-m"
-        peer_m.import_policies = []
-        peer_m.export_policies = []
-        r_m.bgp_peers = [peer_m]
+        def create_router_mock(name, asn, peer_name=None, is_drained=False):
+            interfaces = []
+            bgp_peers = []
+            if peer_name:
+                ifc = compute_v1.RouterInterface(
+                    name=f"if-{name}",
+                    linked_interconnect_attachment=f".../interconnectAttachments/at-{name.replace('router-', '')}"
+                )
+                interfaces.append(ifc)
+                
+                peer = compute_v1.RouterBgpPeer(
+                    name=peer_name,
+                    interface_name=ifc.name,
+                    import_policies=[main.config.import_policy_name] if is_drained else [],
+                    export_policies=[main.config.export_policy_name] if is_drained else []
+                )
+                bgp_peers.append(peer)
+            
+            return compute_v1.Router(
+                name=name,
+                bgp=compute_v1.RouterBgp(asn=asn),
+                interfaces=interfaces,
+                bgp_peers=bgp_peers
+            )
 
-        # Router for stable IC
-        r_s = MagicMock()
-        r_s.name = "router-stable"
-        r_s.bgp.asn = 64513
-        
-        if_s = MagicMock()
-        if_s.name = "if-s"
-        if_s.linked_interconnect_attachment = f".../interconnectAttachments/at-stable"
-        r_s.interfaces = [if_s]
-        
-        peer_s = MagicMock()
-        peer_s.name = "peer-s"
-        peer_s.interface_name = "if-s"
-        peer_s.import_policies = []
-        peer_s.export_policies = []
-        r_s.bgp_peers = [peer_s]
+        routers = {
+            "router-maintenance": create_router_mock("router-maintenance", 64512, "peer-m"),
+            "router-stable": create_router_mock("router-stable", 64513, "peer-s"),
+            "router-recovered": create_router_mock("router-recovered", 64514, "peer-r", is_drained=True),
+            "router-no-bgp": create_router_mock("router-no-bgp", 64515, None),
+            "router-cross-project": create_router_mock("router-cross-project", 64516, "peer-cp"),
+        }
 
-        # Mock Router Client (Global read-only client)
         def get_router_global(project, region, router):
-            if router == "router-maintenance":
-                return r_m
-            elif router == "router-stable":
-                return r_s
+            if router in routers:
+                return routers[router]
             raise ValueError(f"Unknown router {router}")
+        
         mock_routers_client_global.get.side_effect = get_router_global
-        mock_routers_client_global.list_route_policies.return_value = [] # Assume no policies exist yet
+        mock_routers_client_global.list_route_policies.return_value = []
 
-        # Mock Router Client (Thread-local write client)
         mock_routers_client_local = MagicMock()
         mock_get_routers_client.return_value = mock_routers_client_local
         mock_routers_client_local.get.side_effect = get_router_global
         mock_routers_client_local.list_route_policies.return_value = []
         
-        # Mock operations
         mock_op = MagicMock()
         mock_routers_client_local.update_route_policy.return_value = mock_op
         mock_routers_client_local.patch.return_value = mock_op
 
         # 2. Run the Orchestrator
-        main.process_maintenance_events(target_projects=project_id)
+        main.process_maintenance_events(target_projects=f"{project_id},{project_id_2}")
 
         # 3. Verifications
+        patched_routers = [call_args[1].get('router') for call_args in mock_routers_client_local.patch.call_args_list]
+
+        # Verify router-maintenance was patched (drain)
+        self.assertIn('router-maintenance', patched_routers)
         
-        # Verify that only router-maintenance was patched (since only ic-maintenance had outages)
-        # safely_patch_router should have been called for router-maintenance
-        mock_routers_client_local.patch.assert_called_once()
-        args, kwargs = mock_routers_client_local.patch.call_args
-        self.assertEqual(kwargs['router'], 'router-maintenance')
+        # Verify router-recovered was patched (restore)
+        self.assertIn('router-recovered', patched_routers)
         
-        # Verify that router-stable was NOT patched
-        # We can check that patch was not called with router='router-stable'
+        # Verify router-cross-project was patched (drain)
+        self.assertIn('router-cross-project', patched_routers)
+
+        # Verify ignored routers were NOT patched
+        self.assertNotIn('router-stable', patched_routers)
+        self.assertNotIn('router-no-bgp', patched_routers)
+        
+        # Verify the nature of the patches
         for call_args in mock_routers_client_local.patch.call_args_list:
-            self.assertNotEqual(call_args[1].get('router'), 'router-stable')
+            router_name = call_args[1].get('router')
+            patched_router_obj = call_args[1].get('router_resource')
+            patched_peer = patched_router_obj.bgp_peers[0]
+            
+            if router_name in ['router-maintenance', 'router-cross-project']:
+                # Assert policies were added (drain)
+                self.assertIn(main.config.import_policy_name, patched_peer.import_policies)
+                self.assertIn(main.config.export_policy_name, patched_peer.export_policies)
+            elif router_name == 'router-recovered':
+                # Assert policies were removed (restore)
+                self.assertNotIn(main.config.import_policy_name, patched_peer.import_policies)
+                self.assertNotIn(main.config.export_policy_name, patched_peer.export_policies)
 
-        # Verify BGP policy injection on the patched router object passed to API
-        patched_router = kwargs['router_resource']
-        patched_peer = patched_router.bgp_peers[0]
-        self.assertIn(main.config.import_policy_name, patched_peer.import_policies)
-        self.assertIn(main.config.export_policy_name, patched_peer.export_policies)
-
-        # Verify that policy creation was attempted for router-maintenance
-        # should call update_route_policy twice (import and export)
-        self.assertEqual(mock_routers_client_local.update_route_policy.call_count, 2)
-        
-        # Verify it was called for router-maintenance
-        mock_routers_client_local.update_route_policy.assert_has_calls([
-            call(project=project_id, region=region, router='router-maintenance', route_policy_resource=unittest.mock.ANY),
-            call(project=project_id, region=region, router='router-maintenance', route_policy_resource=unittest.mock.ANY)
-        ], any_order=True)
+        # Verify route policy creations (2 for router-maintenance, 2 for router-cross-project, 2 for router-recovered)
+        # ensure_drain_policies_exist runs unconditionally before patching to verify existence.
+        policy_creations = [call_args[1].get('router') for call_args in mock_routers_client_local.update_route_policy.call_args_list]
+        self.assertEqual(policy_creations.count('router-maintenance'), 2)
+        self.assertEqual(policy_creations.count('router-cross-project'), 2)
+        self.assertEqual(policy_creations.count('router-recovered'), 2)
 
 if __name__ == '__main__':
     unittest.main()
