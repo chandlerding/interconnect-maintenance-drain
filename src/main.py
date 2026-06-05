@@ -20,6 +20,13 @@ class OrchestratorConfig:
     import_policy_name: str = "interconnect-maintenance-drain-import"
     export_policy_name: str = "interconnect-maintenance-drain-export"
     wildcard_match_expr: str = "destination.inAnyRange([prefix('0.0.0.0/0').orLonger(), prefix('::/0').orLonger()])"
+    import_policy_actions: Tuple[str, ...] = (
+        "med.add(65535)",
+        "asPath.prependSequence([{asn}, {asn}, {asn}, {asn}])"
+    )
+    export_policy_actions: Tuple[str, ...] = (
+        "asPath.prependSequence([{asn}, {asn}, {asn}, {asn}])",
+    )
 
 config = OrchestratorConfig()
 
@@ -353,13 +360,8 @@ def ensure_drain_policies_exist(project_id: str, region: str, router: compute_v1
         expected_import_actions = ["nextPolicy()"]
         expected_export_actions = ["nextPolicy()"]
     else:
-        expected_import_actions = [
-             "med.add(65535)",
-             f"asPath.prependSequence([{router.bgp.asn}, {router.bgp.asn}, {router.bgp.asn}, {router.bgp.asn}])"
-        ]
-        expected_export_actions = [
-             f"asPath.prependSequence([{router.bgp.asn}, {router.bgp.asn}, {router.bgp.asn}, {router.bgp.asn}])"
-        ]
+        expected_import_actions = [action.format(asn=router.bgp.asn) for action in config.import_policy_actions]
+        expected_export_actions = [action.format(asn=router.bgp.asn) for action in config.export_policy_actions]
 
     logging.info(f"Reconciling route policies for router '{router.name}'. Expected import actions: {expected_import_actions}, export actions: {expected_export_actions}")
 
