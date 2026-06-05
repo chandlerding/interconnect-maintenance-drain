@@ -134,8 +134,8 @@ class InterconnectMaintenanceIntegrationTest(unittest.TestCase):
         # Verify BGP policy injection on the patched router object passed to API
         patched_router = kwargs['router_resource']
         patched_peer = patched_router.bgp_peers[0]
-        self.assertIn(main.IMPORT_POLICY_NAME, patched_peer.import_policies)
-        self.assertIn(main.EXPORT_POLICY_NAME, patched_peer.export_policies)
+        self.assertIn(main.config.import_policy_name, patched_peer.import_policies)
+        self.assertIn(main.config.export_policy_name, patched_peer.export_policies)
 
         # Verify that policy creation was attempted for router-maintenance
         # should call update_route_policy twice (import and export)
