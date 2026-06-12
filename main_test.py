@@ -35,12 +35,15 @@ class TestIsPeerAligned(unittest.TestCase):
         self.assertFalse(main.is_peer_aligned("NORMAL", True))
 
 class TestUpdateFinalStatuses(unittest.TestCase):
+    def setUp(self):
+        self.orchestrator = main.MaintenanceOrchestrator(main.OrchestratorConfig())
+
     def test_update_success(self):
         run_summary = [
             main.InterconnectAuditResult(project_id="p1", interconnect="ic1", outage_id="NONE", target_state="DRAINED", current_state="NORMAL", action="NO_ACTION", status="PENDING_ALIGNMENT", associated_routers=[("p1", "r1", "rt1")])
         ]
         results = {("p1", "r1", "rt1"): {"success": True}}
-        main._update_final_statuses(run_summary, results)
+        self.orchestrator._update_final_statuses(run_summary, results)
         self.assertEqual(run_summary[0].status, "SUCCESS")
 
     def test_update_failed(self):
@@ -48,7 +51,7 @@ class TestUpdateFinalStatuses(unittest.TestCase):
             main.InterconnectAuditResult(project_id="p1", interconnect="ic1", outage_id="NONE", target_state="DRAINED", current_state="NORMAL", action="NO_ACTION", status="PENDING_ALIGNMENT", associated_routers=[("p1", "r1", "rt1")])
         ]
         results = {("p1", "r1", "rt1"): {"success": False, "error": "some error"}}
-        main._update_final_statuses(run_summary, results)
+        self.orchestrator._update_final_statuses(run_summary, results)
         self.assertEqual(run_summary[0].status, "FAILED: some error")
         self.assertEqual(run_summary[0].action, "ERROR")
 
@@ -57,10 +60,13 @@ class TestUpdateFinalStatuses(unittest.TestCase):
             main.InterconnectAuditResult(project_id="p1", interconnect="ic1", outage_id="NONE", target_state="NORMAL", current_state="NORMAL", action="NO_ACTION", status="SUCCESS: NO_ATTACHMENTS", associated_routers=[])
         ]
         results = {}
-        main._update_final_statuses(run_summary, results)
+        self.orchestrator._update_final_statuses(run_summary, results)
         self.assertEqual(run_summary[0].status, "SUCCESS: NO_ATTACHMENTS")
 
 class TestEvaluateAndConsolidate(unittest.TestCase):
+    def setUp(self):
+        self.orchestrator = main.MaintenanceOrchestrator(main.OrchestratorConfig())
+
     def test_no_change_needed(self):
         run_summary = [
             main.InterconnectAuditResult(project_id="p1", interconnect="ic1", outage_id="NONE", target_state="NORMAL", current_state="NORMAL", action="NO_ACTION", status="SUCCESS", _peer_targets=[
@@ -72,7 +78,7 @@ class TestEvaluateAndConsolidate(unittest.TestCase):
                 "gp1": main.BgpPeerTarget(project_id="p1", region="r1", router_name="rt1", peer_name="gp1", target_policy_state="NORMAL", is_drained_currently=False)
             }
         }
-        filtered = main._evaluate_and_consolidate(run_summary, routers_to_align)
+        filtered = self.orchestrator._evaluate_and_consolidate(run_summary, routers_to_align)
         self.assertEqual(len(filtered), 0)
         self.assertEqual(run_summary[0].action, "NO_ACTION")
         self.assertEqual(run_summary[0].status, "SUCCESS")
@@ -89,7 +95,7 @@ class TestEvaluateAndConsolidate(unittest.TestCase):
                 "gp1": main.BgpPeerTarget(project_id="p1", region="r1", router_name="rt1", peer_name="gp1", target_policy_state="DRAINED", is_drained_currently=False)
             }
         }
-        filtered = main._evaluate_and_consolidate(run_summary, routers_to_align)
+        filtered = self.orchestrator._evaluate_and_consolidate(run_summary, routers_to_align)
         self.assertIn(("p1", "r1", "rt1"), filtered)
         self.assertEqual(run_summary[0].action, "DRAINED")
         self.assertEqual(run_summary[0].status, "PENDING_ALIGNMENT")
@@ -105,36 +111,40 @@ class TestEvaluateAndConsolidate(unittest.TestCase):
                 "gp1": main.BgpPeerTarget(project_id="p1", region="r1", router_name="rt1", peer_name="gp1", target_policy_state="NORMAL", is_drained_currently=True)
             }
         }
-        filtered = main._evaluate_and_consolidate(run_summary, routers_to_align)
+        filtered = self.orchestrator._evaluate_and_consolidate(run_summary, routers_to_align)
         self.assertIn(("p1", "r1", "rt1"), filtered)
         self.assertEqual(run_summary[0].action, "RESTORED")
         self.assertEqual(run_summary[0].status, "PENDING_ALIGNMENT")
 
 class TestAuditProjects(unittest.TestCase):
-    @patch('src.main.interconnects_client')
-    @patch('src.main.process_interconnect_maintenance_events')
-    def test_audit_success(self, mock_process, mock_ic_client):
+    def setUp(self):
+        self.mock_ic_client = MagicMock()
+        self.orchestrator = main.MaintenanceOrchestrator(
+            main.OrchestratorConfig(), interconnects_client=self.mock_ic_client
+        )
+
+    @patch.object(main.MaintenanceOrchestrator, 'process_interconnect_maintenance_events')
+    def test_audit_success(self, mock_process):
         mock_ic = compute_v1.Interconnect(name="ic1")
-        mock_ic_client.list.return_value = [mock_ic]
+        self.mock_ic_client.list.return_value = [mock_ic]
 
         mock_process.return_value = (
             main.InterconnectAuditResult(project_id="p1", interconnect="ic1", outage_id="NONE", target_state="DRAINED", current_state="NORMAL", action="NO_ACTION", status="SUCCESS"),
             [main.BgpPeerTarget(project_id="p1", region="r1", router_name="rt1", peer_name="gp1", target_policy_state="DRAINED", is_drained_currently=False)]
         )
 
-        run_summary, routers_to_align, failed_projects = main._audit_projects(["p1"])
+        run_summary, routers_to_align, failed_projects = self.orchestrator._audit_projects(["p1"])
 
         self.assertEqual(len(run_summary), 1)
         self.assertEqual(run_summary[0].interconnect, "ic1")
         self.assertIn(("p1", "r1", "rt1"), routers_to_align)
         self.assertEqual(len(failed_projects), 0)
 
-    @patch('src.main.interconnects_client')
-    def test_audit_forbidden(self, mock_ic_client):
+    def test_audit_forbidden(self):
         from google.api_core import exceptions as gcp_exceptions
-        mock_ic_client.list.side_effect = gcp_exceptions.Forbidden("Forbidden")
+        self.mock_ic_client.list.side_effect = gcp_exceptions.Forbidden("Forbidden")
 
-        run_summary, routers_to_align, failed_projects = main._audit_projects(["p1"])
+        run_summary, routers_to_align, failed_projects = self.orchestrator._audit_projects(["p1"])
 
         self.assertEqual(len(run_summary), 1)
         self.assertEqual(run_summary[0].status, "FAILED: IAM_PERMISSION_DENIED")
@@ -142,18 +152,22 @@ class TestAuditProjects(unittest.TestCase):
         self.assertIn("p1", failed_projects)
 
 class TestProcessMaintenanceEvents(unittest.TestCase):
-    @patch('src.main._audit_projects')
-    @patch('src.main._evaluate_and_consolidate')
-    @patch('src.main._align_routers_parallel')
-    @patch('src.main._update_final_statuses')
+    def setUp(self):
+        self.config = main.OrchestratorConfig()
+        self.orchestrator = main.MaintenanceOrchestrator(self.config)
+
+    @patch.object(main.MaintenanceOrchestrator, '_audit_projects')
+    @patch.object(main.MaintenanceOrchestrator, '_evaluate_and_consolidate')
+    @patch.object(main.MaintenanceOrchestrator, '_align_routers_parallel')
+    @patch.object(main.MaintenanceOrchestrator, '_update_final_statuses')
     @patch('src.main.log_sre_summary_table')
     def test_process_success(self, mock_log, mock_update, mock_align, mock_evaluate, mock_audit):
         mock_audit.return_value = ([], {}, set())
         mock_evaluate.return_value = {}
         mock_align.return_value = {}
+        self.config.projects = "p1"
 
-        with patch.object(main.config, 'projects', "p1"):
-            main.process_maintenance_events()
+        self.orchestrator.process_maintenance_events()
 
         mock_audit.assert_called_once_with(["p1"])
         mock_evaluate.assert_called_once()
@@ -161,14 +175,17 @@ class TestProcessMaintenanceEvents(unittest.TestCase):
         mock_update.assert_called_once()
         mock_log.assert_called_once()
 
-    @patch('src.main._audit_projects')
+    @patch.object(main.MaintenanceOrchestrator, '_audit_projects')
     def test_process_no_projects(self, mock_audit):
-        with patch.object(main.config, 'projects', ''):
-            with self.assertRaises(ValueError):
-                main.process_maintenance_events()
+        self.config.projects = ""
+        with self.assertRaises(ValueError):
+            self.orchestrator.process_maintenance_events()
 
 class TestProcessInterconnectMaintenanceEvents(unittest.TestCase):
-    @patch('src.main.check_current_bgp_states')
+    def setUp(self):
+        self.orchestrator = main.MaintenanceOrchestrator(main.OrchestratorConfig())
+
+    @patch.object(main.MaintenanceOrchestrator, 'check_current_bgp_states')
     def test_no_outages(self, mock_check_bgp):
         mock_ic = compute_v1.Interconnect(
             name="ic1",
@@ -180,14 +197,14 @@ class TestProcessInterconnectMaintenanceEvents(unittest.TestCase):
             {"project_id": "p1", "region": "r1", "router_name": "rt1", "peer_name": "gp1", "is_drained": False}
         ]
 
-        record, peer_targets = main.process_interconnect_maintenance_events("p1", mock_ic, {})
+        record, peer_targets = self.orchestrator.process_interconnect_maintenance_events("p1", mock_ic, {})
 
         self.assertEqual(record.target_state, "NORMAL")
         self.assertEqual(record.current_state, "NORMAL")
         self.assertEqual(len(peer_targets), 1)
         self.assertEqual(peer_targets[0].target_policy_state, "NORMAL")
 
-    @patch('src.main.check_current_bgp_states')
+    @patch.object(main.MaintenanceOrchestrator, 'check_current_bgp_states')
     def test_active_outage(self, mock_check_bgp):
         now = datetime.now(timezone.utc)
         mock_outage = compute_v1.InterconnectOutageNotification(
@@ -206,14 +223,14 @@ class TestProcessInterconnectMaintenanceEvents(unittest.TestCase):
             {"project_id": "p1", "region": "r1", "router_name": "rt1", "peer_name": "gp1", "is_drained": False}
         ]
 
-        record, peer_targets = main.process_interconnect_maintenance_events("p1", mock_ic, {})
+        record, peer_targets = self.orchestrator.process_interconnect_maintenance_events("p1", mock_ic, {})
 
         self.assertEqual(record.target_state, "DRAINED")
         self.assertEqual(record.current_state, "NORMAL")
         self.assertEqual(len(peer_targets), 1)
         self.assertEqual(peer_targets[0].target_policy_state, "DRAINED")
 
-    @patch('src.main.check_current_bgp_states')
+    @patch.object(main.MaintenanceOrchestrator, 'check_current_bgp_states')
     def test_imminent_outage(self, mock_check_bgp):
         now = datetime.now(timezone.utc)
         mock_outage = compute_v1.InterconnectOutageNotification(
@@ -232,11 +249,11 @@ class TestProcessInterconnectMaintenanceEvents(unittest.TestCase):
             {"project_id": "p1", "region": "r1", "router_name": "rt1", "peer_name": "gp1", "is_drained": False}
         ]
 
-        record, peer_targets = main.process_interconnect_maintenance_events("p1", mock_ic, {})
+        record, peer_targets = self.orchestrator.process_interconnect_maintenance_events("p1", mock_ic, {})
 
         self.assertEqual(record.target_state, "DRAINED")
 
-    @patch('src.main.check_current_bgp_states')
+    @patch.object(main.MaintenanceOrchestrator, 'check_current_bgp_states')
     def test_future_outage_not_imminent(self, mock_check_bgp):
         now = datetime.now(timezone.utc)
         mock_outage = compute_v1.InterconnectOutageNotification(
@@ -255,7 +272,7 @@ class TestProcessInterconnectMaintenanceEvents(unittest.TestCase):
             {"project_id": "p1", "region": "r1", "router_name": "rt1", "peer_name": "gp1", "is_drained": False}
         ]
 
-        record, peer_targets = main.process_interconnect_maintenance_events("p1", mock_ic, {})
+        record, peer_targets = self.orchestrator.process_interconnect_maintenance_events("p1", mock_ic, {})
 
         self.assertEqual(record.target_state, "NORMAL")
 
