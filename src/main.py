@@ -52,6 +52,14 @@ class InterconnectAuditResult:
     associated_routers: List[Tuple[str, str, str]] = field(default_factory=list)
     _peer_targets: List[BgpPeerTarget] = field(default_factory=list)
 
+@dataclass
+class RouterReconciliationPlan:
+    """Represents an executable reconciliation plan for a Cloud Router."""
+    project_id: str
+    region: str
+    router_name: str
+    peer_targets: List[BgpPeerTarget]
+
 class MaintenanceOrchestrator:
     """Main orchestrator class containing core alignment logic, decoupling dependencies."""
     def __init__(
@@ -78,9 +86,9 @@ class MaintenanceOrchestrator:
         project_list = list(dict.fromkeys(p.strip() for p in projects_to_use.split(",") if p.strip()))
         logging.info(f"Targeted networks maintenance events check scoped to project list: {project_list}")
         
-        run_summary, routers_to_align, failed_projects = self._audit_projects(project_list)
-        filtered_routers_to_align = self._evaluate_and_consolidate(run_summary, routers_to_align)
-        router_alignment_results = self._align_routers_parallel(filtered_routers_to_align, failed_projects)
+        run_summary, failed_projects = self._audit_projects(project_list)
+        reconciliation_plans = self._create_reconciliation_plans(run_summary)
+        router_alignment_results = self._align_routers_parallel(reconciliation_plans, failed_projects)
         self._update_final_statuses(run_summary, router_alignment_results)
         
         log_sre_summary_table(run_summary)
@@ -384,9 +392,9 @@ class MaintenanceOrchestrator:
 
         return import_patched or export_patched
 
-    def _audit_projects(self, project_list: list) -> tuple:
+    def _audit_projects(self, project_list: list) -> Tuple[List[InterconnectAuditResult], set]:
+        """Audits targeted GCP projects and collects pure Interconnect and BGP peer audit results."""
         run_summary = []
-        routers_to_align = {}
         router_cache = {}
         failed_projects = set()
 
@@ -403,27 +411,8 @@ class MaintenanceOrchestrator:
                          )
                          record._peer_targets = peer_targets 
                          run_summary.append(record)
-                         
-                         if peer_targets:
-                              associated_routers = set()
-                              for target in peer_targets:
-                                   rkey = (target.project_id, target.region, target.router_name)
-                                   associated_routers.add(rkey)
-                                   
-                                   if rkey not in routers_to_align:
-                                        routers_to_align[rkey] = {}
-                                   
-                                   peer_name = target.peer_name
-                                   if peer_name not in routers_to_align[rkey]:
-                                        routers_to_align[rkey][peer_name] = target
-                                   else:
-                                        existing = routers_to_align[rkey][peer_name]
-                                        if target.target_policy_state == "DRAINED":
-                                             existing.target_policy_state = "DRAINED"
-                                             
-                              record.associated_routers = list(associated_routers)
                     except gcp_exceptions.Forbidden as e:
-                         error_details = f"CRITICAL: IAM PERMISSION DENIED processing physical link '{ic.name}' under project '{project_id}'. The orchestrator Service Account is missing required read permissions. Details: {e}"
+                         error_details = f"CRITICAL: IAM PERMISSION DENIED processing physical link '{ic.name}' under project '{project_id}'. Details: {e}"
                          logging.error(error_details, exc_info=True)
                          run_summary.append(InterconnectAuditResult(
                              project_id=project_id, interconnect=ic.name, outage_id="UNKNOWN",
@@ -440,7 +429,7 @@ class MaintenanceOrchestrator:
                          failed_projects.add(project_id)
                           
             except gcp_exceptions.Forbidden as e:
-                error_details = f"CRITICAL: IAM PERMISSION DENIED listing project '{project_id}'. The orchestrator Service Account is missing 'compute.interconnects.list'. Details: {e}"
+                error_details = f"CRITICAL: IAM PERMISSION DENIED listing project '{project_id}'. Details: {e}"
                 logging.error(error_details, exc_info=True)
                 run_summary.append(InterconnectAuditResult(
                     project_id=project_id, interconnect="ALL_LINKS", outage_id="N/A",
@@ -456,61 +445,86 @@ class MaintenanceOrchestrator:
                 ))
                 failed_projects.add(project_id)
                 
-        return run_summary, routers_to_align, failed_projects
+        return run_summary, failed_projects
 
-    def _evaluate_and_consolidate(self, run_summary: List[InterconnectAuditResult], routers_to_align: dict) -> dict:
-        filtered_routers_to_align = {}
-        for rkey, mods_dict in routers_to_align.items():
-             needs_alignment = False
-             for peer_name, target in mods_dict.items():
-                  if not is_peer_aligned(target.target_policy_state, target.is_drained_currently):
-                       needs_alignment = True
-                       break
-             if needs_alignment:
-                  filtered_routers_to_align[rkey] = mods_dict
+    def _create_reconciliation_plans(self, run_summary: List[InterconnectAuditResult]) -> List[RouterReconciliationPlan]:
+        """Separation of concerns: consolidates desired BGP peer states and produces executable reconciliation plans."""
+        unified_peer_map = {} 
+        
+        for record in run_summary:
+            if not record._peer_targets:
+                continue
+            
+            for target in record._peer_targets:
+                pkey = (target.project_id, target.region, target.router_name, target.peer_name)
+                if pkey not in unified_peer_map:
+                    unified_peer_map[pkey] = target
+                else:
+                    existing = unified_peer_map[pkey]
+                    if target.target_policy_state == "DRAINED":
+                        existing.target_policy_state = "DRAINED"
+
+        router_plan_map = {} 
+        for pkey, target in unified_peer_map.items():
+            rkey = pkey[:3]
+            if rkey not in router_plan_map:
+                router_plan_map[rkey] = []
+            router_plan_map[rkey].append(target)
+
+        executable_plans = []
+        for rkey, peer_targets in router_plan_map.items():
+            needs_alignment = any(
+                not is_peer_aligned(t.target_policy_state, t.is_drained_currently) 
+                for t in peer_targets
+            )
+            if needs_alignment:
+                proj, region, router_name = rkey
+                executable_plans.append(RouterReconciliationPlan(
+                    project_id=proj,
+                    region=region,
+                    router_name=router_name,
+                    peer_targets=peer_targets
+                ))
 
         for record in run_summary:
-             if not record._peer_targets:
-                  continue
-             
-             peer_targets = record._peer_targets
-             has_delta = False
-             ic_target_state = record.target_state
-             
-             for target in peer_targets:
-                  rkey = (target.project_id, target.region, target.router_name)
-                  peer_name = target.peer_name
-                  
-                  consolidated_target = routers_to_align[rkey][peer_name].target_policy_state
-                  is_drained = target.is_drained_currently
-                  
-                  if not is_peer_aligned(consolidated_target, is_drained):
-                       has_delta = True
-                       ic_target_state = consolidated_target
-                       break
-             
-             if has_delta:
-                  record.action = "DRAINED" if ic_target_state == "DRAINED" else "RESTORED"
-                  record.status = "PENDING_ALIGNMENT"
-             else:
-                  record.action = "NO_ACTION"
-                  record.status = "SUCCESS"
-              
-             record._peer_targets = []
-             
-        return filtered_routers_to_align
+            if not record._peer_targets:
+                continue
+            
+            has_delta = False
+            ic_target_state = record.target_state
+            
+            for target in record._peer_targets:
+                pkey = (target.project_id, target.region, target.router_name, target.peer_name)
+                final_target_state = unified_peer_map[pkey].target_policy_state
+                
+                if not is_peer_aligned(final_target_state, target.is_drained_currently):
+                    has_delta = True
+                    ic_target_state = final_target_state
+                    break
+                    
+            if has_delta:
+                record.action = "DRAINED" if ic_target_state == "DRAINED" else "RESTORED"
+                record.status = "PENDING_ALIGNMENT"
+            else:
+                record.action = "NO_ACTION"
+                record.status = "SUCCESS"
+                
+            record.associated_routers = list(set((t.project_id, t.region, t.router_name) for t in record._peer_targets))
+            record._peer_targets = []
 
-    def _align_routers_parallel(self, filtered_routers_to_align: dict, failed_projects: set) -> dict:
+        return executable_plans
+
+    def _align_routers_parallel(self, plans: List[RouterReconciliationPlan], failed_projects: set) -> dict:
         router_alignment_results = {}
         write_futures = {}
         
-        if filtered_routers_to_align:
-             logging.info(f"Unified Router Ledger prepared with {len(filtered_routers_to_align)} distinct Cloud Routers to align.")
+        if plans:
+             logging.info(f"Unified Router Ledger prepared with {len(plans)} distinct Cloud Routers to align.")
              
              with ThreadPoolExecutor(max_workers=4) as write_executor:
-                  for rkey, mods_dict in filtered_routers_to_align.items():
-                       mods = list(mods_dict.values())
-                       future = write_executor.submit(self.safely_patch_router, rkey, mods)
+                  for plan in plans:
+                       rkey = (plan.project_id, plan.region, plan.router_name)
+                       future = write_executor.submit(self.safely_patch_router, rkey, plan.peer_targets)
                        write_futures[future] = rkey
 
                   logging.info(f"Waiting for {len(write_futures)} Cloud Router alignment tasks to complete (Max 4 concurrent)...")

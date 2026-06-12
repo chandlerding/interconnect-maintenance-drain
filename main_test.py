@@ -63,7 +63,7 @@ class TestUpdateFinalStatuses(unittest.TestCase):
         self.orchestrator._update_final_statuses(run_summary, results)
         self.assertEqual(run_summary[0].status, "SUCCESS: NO_ATTACHMENTS")
 
-class TestEvaluateAndConsolidate(unittest.TestCase):
+class TestCreateReconciliationPlans(unittest.TestCase):
     def setUp(self):
         self.orchestrator = main.MaintenanceOrchestrator(main.OrchestratorConfig())
 
@@ -73,13 +73,8 @@ class TestEvaluateAndConsolidate(unittest.TestCase):
                 main.BgpPeerTarget(project_id="p1", region="r1", router_name="rt1", peer_name="gp1", target_policy_state="NORMAL", is_drained_currently=False)
             ])
         ]
-        routers_to_align = {
-            ("p1", "r1", "rt1"): {
-                "gp1": main.BgpPeerTarget(project_id="p1", region="r1", router_name="rt1", peer_name="gp1", target_policy_state="NORMAL", is_drained_currently=False)
-            }
-        }
-        filtered = self.orchestrator._evaluate_and_consolidate(run_summary, routers_to_align)
-        self.assertEqual(len(filtered), 0)
+        plans = self.orchestrator._create_reconciliation_plans(run_summary)
+        self.assertEqual(len(plans), 0)
         self.assertEqual(run_summary[0].action, "NO_ACTION")
         self.assertEqual(run_summary[0].status, "SUCCESS")
         self.assertEqual(run_summary[0]._peer_targets, [])
@@ -90,13 +85,9 @@ class TestEvaluateAndConsolidate(unittest.TestCase):
                 main.BgpPeerTarget(project_id="p1", region="r1", router_name="rt1", peer_name="gp1", target_policy_state="DRAINED", is_drained_currently=False)
             ])
         ]
-        routers_to_align = {
-            ("p1", "r1", "rt1"): {
-                "gp1": main.BgpPeerTarget(project_id="p1", region="r1", router_name="rt1", peer_name="gp1", target_policy_state="DRAINED", is_drained_currently=False)
-            }
-        }
-        filtered = self.orchestrator._evaluate_and_consolidate(run_summary, routers_to_align)
-        self.assertIn(("p1", "r1", "rt1"), filtered)
+        plans = self.orchestrator._create_reconciliation_plans(run_summary)
+        self.assertEqual(len(plans), 1)
+        self.assertEqual(plans[0].router_name, "rt1")
         self.assertEqual(run_summary[0].action, "DRAINED")
         self.assertEqual(run_summary[0].status, "PENDING_ALIGNMENT")
 
@@ -106,13 +97,9 @@ class TestEvaluateAndConsolidate(unittest.TestCase):
                 main.BgpPeerTarget(project_id="p1", region="r1", router_name="rt1", peer_name="gp1", target_policy_state="NORMAL", is_drained_currently=True)
             ])
         ]
-        routers_to_align = {
-            ("p1", "r1", "rt1"): {
-                "gp1": main.BgpPeerTarget(project_id="p1", region="r1", router_name="rt1", peer_name="gp1", target_policy_state="NORMAL", is_drained_currently=True)
-            }
-        }
-        filtered = self.orchestrator._evaluate_and_consolidate(run_summary, routers_to_align)
-        self.assertIn(("p1", "r1", "rt1"), filtered)
+        plans = self.orchestrator._create_reconciliation_plans(run_summary)
+        self.assertEqual(len(plans), 1)
+        self.assertEqual(plans[0].router_name, "rt1")
         self.assertEqual(run_summary[0].action, "RESTORED")
         self.assertEqual(run_summary[0].status, "PENDING_ALIGNMENT")
 
@@ -133,18 +120,17 @@ class TestAuditProjects(unittest.TestCase):
             [main.BgpPeerTarget(project_id="p1", region="r1", router_name="rt1", peer_name="gp1", target_policy_state="DRAINED", is_drained_currently=False)]
         )
 
-        run_summary, routers_to_align, failed_projects = self.orchestrator._audit_projects(["p1"])
+        run_summary, failed_projects = self.orchestrator._audit_projects(["p1"])
 
         self.assertEqual(len(run_summary), 1)
         self.assertEqual(run_summary[0].interconnect, "ic1")
-        self.assertIn(("p1", "r1", "rt1"), routers_to_align)
         self.assertEqual(len(failed_projects), 0)
 
     def test_audit_forbidden(self):
         from google.api_core import exceptions as gcp_exceptions
         self.mock_ic_client.list.side_effect = gcp_exceptions.Forbidden("Forbidden")
 
-        run_summary, routers_to_align, failed_projects = self.orchestrator._audit_projects(["p1"])
+        run_summary, failed_projects = self.orchestrator._audit_projects(["p1"])
 
         self.assertEqual(len(run_summary), 1)
         self.assertEqual(run_summary[0].status, "FAILED: IAM_PERMISSION_DENIED")
@@ -157,20 +143,20 @@ class TestProcessMaintenanceEvents(unittest.TestCase):
         self.orchestrator = main.MaintenanceOrchestrator(self.config)
 
     @patch.object(main.MaintenanceOrchestrator, '_audit_projects')
-    @patch.object(main.MaintenanceOrchestrator, '_evaluate_and_consolidate')
+    @patch.object(main.MaintenanceOrchestrator, '_create_reconciliation_plans')
     @patch.object(main.MaintenanceOrchestrator, '_align_routers_parallel')
     @patch.object(main.MaintenanceOrchestrator, '_update_final_statuses')
     @patch('src.main.log_sre_summary_table')
-    def test_process_success(self, mock_log, mock_update, mock_align, mock_evaluate, mock_audit):
-        mock_audit.return_value = ([], {}, set())
-        mock_evaluate.return_value = {}
+    def test_process_success(self, mock_log, mock_update, mock_align, mock_create, mock_audit):
+        mock_audit.return_value = ([], set())
+        mock_create.return_value = []
         mock_align.return_value = {}
         self.config.projects = "p1"
 
         self.orchestrator.process_maintenance_events()
 
         mock_audit.assert_called_once_with(["p1"])
-        mock_evaluate.assert_called_once()
+        mock_create.assert_called_once()
         mock_align.assert_called_once()
         mock_update.assert_called_once()
         mock_log.assert_called_once()
