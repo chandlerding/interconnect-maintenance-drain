@@ -29,7 +29,7 @@ def parse_attachment_url(url: str) -> Tuple[str, str, str]:
     return match.group(1), match.group(2), match.group(3)
 
 def log_sre_summary_table(records: List[InterconnectAuditResult]):
-    """Renders an elegant, GitHub markdown formatted summary table of all maintenance operations."""
+    """Renders a GitHub markdown formatted summary table of all maintenance operations."""
     if not records:
         logging.info("\n### GCI MAINTENANCE EVENTS SUMMARY: ZERO INTERCONNECTS DETECTED")
         return

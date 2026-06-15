@@ -17,7 +17,7 @@ except ImportError:
     from utils import parse_epoch_ms, parse_attachment_url, is_peer_aligned, log_sre_summary_table
 
 class MaintenanceOrchestrator:
-    """Main orchestrator class containing core alignment logic, decoupling dependencies and enabling highly scalable multi-threaded discovery."""
+    """Main orchestrator class containing core alignment logic, decoupling dependencies and enabling scalable multi-threaded discovery."""
     def __init__(
         self, 
         config: OrchestratorConfig,
@@ -403,7 +403,7 @@ class MaintenanceOrchestrator:
         return import_patched or export_patched
 
     def _audit_projects(self, project_list: list) -> Tuple[List[InterconnectAuditResult], set]:
-        """Audits targeted GCP projects with extremely fast multi-threaded Interconnect discovery."""
+        """Audits targeted GCP projects with multi-threaded Interconnect discovery."""
         run_summary = []
         router_cache = {}
         failed_projects = set()

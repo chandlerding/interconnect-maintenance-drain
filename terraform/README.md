@@ -9,7 +9,7 @@ The template provisions:
 2.  **Service Accounts**:
     *   `ic-drain-job-sa`: The runtime identity used by the Cloud Run Job.
     *   `ic-drain-scheduler-sa`: The identity used by Cloud Scheduler to trigger the Cloud Run Job.
-3.  **Custom IAM Role**: `RouterPolicyEditor` containing minimal permissions required to update Cloud Router route policies and BGP peers (`compute.routers.update`, `compute.routers.updateRoutePolicy`, `compute.routers.get`). Depending on your configuration, it is created locally in each target project (Option 1) or at the Organization level (Option 2).
+3.  **Custom IAM Role**: `RouterPolicyEditor` containing minimal permissions required to update Cloud Router route policies and BGP peers (`compute.routers.update`, `compute.routers.updateRoutePolicy`, `compute.routers.deleteRoutePolicy`, `compute.routers.get`). Depending on your configuration, it is created locally in each target project (Option 1) or at the Organization level (Option 2).
 4.  **Cloud Run Job**: Packages the orchestrator and configures environment variables (`INTERCONNECT_PROJECTS`, `DRAIN_LEAD_TIME_MINUTES`, `NO_OP_POLICIES`).
 5.  **Cloud Scheduler**: Triggers the Cloud Run Job at the specified interval.
 
@@ -99,7 +99,10 @@ To tear down the deployed resources, run:
 ```bash
 terraform destroy
 ```
-*Note: Any route policies created by the orchestrator on live Cloud Routers will NOT be deleted by Terraform. If you want to clean them up, run the orchestrator once with no outages active to ensure it removes the policy associations from BGP peers, then you can manually delete the policies from the routers if desired.*
+*Note: Route policies created by the orchestrator on live Cloud Routers will not be deleted by Terraform directly. To entirely clean them up across your Google networks, simply execute our automated un-installation mode before running terraform destroy:*
+```bash
+python3 -m src.main --cleanup-policies
+```
 
 ---
 
