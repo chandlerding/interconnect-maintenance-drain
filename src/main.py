@@ -3,6 +3,8 @@ import logging
 import re
 import time
 import random
+import threading
+import types
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from google.cloud import compute_v1
@@ -67,12 +69,26 @@ class MaintenanceOrchestrator:
         config: OrchestratorConfig,
         interconnects_client: compute_v1.InterconnectsClient = None,
         attachments_client: compute_v1.InterconnectAttachmentsClient = None,
-        routers_client: compute_v1.RoutersClient = None
+        routers_client = None
     ):
         self.config = config
         self.interconnects_client = interconnects_client or compute_v1.InterconnectsClient()
         self.attachments_client = attachments_client or compute_v1.InterconnectAttachmentsClient()
-        self.routers_client = routers_client or compute_v1.RoutersClient()
+        
+        if routers_client is None:
+            self._routers_client_factory = compute_v1.RoutersClient
+        elif isinstance(routers_client, (type, types.FunctionType)):
+            self._routers_client_factory = routers_client
+        else:
+            self._routers_client_factory = lambda: routers_client
+            
+        self._thread_local = threading.local()
+
+    @property
+    def routers_client(self):
+        if not hasattr(self._thread_local, "client"):
+            self._thread_local.client = self._routers_client_factory()
+        return self._thread_local.client
 
     def process_maintenance_events(self, target_projects: str = ""):
         logging.info(f"Maintenance Events Check Loop Started at {datetime.now(timezone.utc).isoformat()}")
