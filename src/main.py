@@ -16,9 +16,11 @@ except ImportError:
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
 
-def process_maintenance_events(target_projects: str = ""):
+def process_maintenance_events(target_projects: str = "", no_op_policies: bool = False):
     """Top-level execution wrapper for backward compatibility."""
     config = OrchestratorConfig()
+    if no_op_policies:
+        config.no_op_policies = True
     orchestrator = MaintenanceOrchestrator(config)
     orchestrator.process_maintenance_events(target_projects)
 
@@ -28,9 +30,11 @@ def cleanup_all_route_policies(target_projects: str = ""):
     orchestrator = MaintenanceOrchestrator(config)
     orchestrator.cleanup_route_policies(target_projects)
 
-def execute_manual_override(interconnect_name: str, enforce_drain: bool, target_projects: str = ""):
+def execute_manual_override(interconnect_name: str, enforce_drain: bool, target_projects: str = "", no_op_policies: bool = False):
     """Top-level execution wrapper for emergency manual interconnect override feature."""
     config = OrchestratorConfig()
+    if no_op_policies:
+        config.no_op_policies = True
     orchestrator = MaintenanceOrchestrator(config)
     orchestrator.manual_override_interconnect(interconnect_name, enforce_drain, target_projects)
 
@@ -41,6 +45,11 @@ if __name__ == "__main__":
         "--projects",
         default="",
         help="Optional: Comma-separated list of GCP Project IDs to scan. If omitted, falls back to config.projects."
+    )
+    parser.add_argument(
+        "--no-op-policies",
+        action="store_true",
+        help="Optional: Deploy non-disruptive nextPolicy() BGP route rules rather than active MED/AS-Path prepends. Note: This still executes actual API write calls to GCP Cloud Routers."
     )
     parser.add_argument(
         "--cleanup-policies",
@@ -75,7 +84,11 @@ if __name__ == "__main__":
         execute_manual_override(
             interconnect_name=args.interconnect, 
             enforce_drain=args.manual_drain, 
-            target_projects=args.projects
+            target_projects=args.projects,
+            no_op_policies=args.no_op_policies
         )
     else:
-        process_maintenance_events(target_projects=args.projects)
+        process_maintenance_events(
+            target_projects=args.projects,
+            no_op_policies=args.no_op_policies
+        )

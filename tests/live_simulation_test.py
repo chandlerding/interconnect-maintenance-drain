@@ -6,23 +6,31 @@ from google.cloud import compute_v1
 from src import main
 
 # This test requires credentials and a real GCP environment to read from.
-# It will NOT make any modifications (writes are mocked) unless LIVE_TEST_ENABLE_WRITES=1.
-# Run with:
-#   LIVE_TEST_PROJECT="your-project" LIVE_TEST_INTERCONNECT="your-ic" .venv/bin/python live_simulation_test.py
+# It will NOT make any modifications (writes are mocked) unless --enable-writes is specified.
+# Run via CLI parameters (Recommended):
+#   python3 -m tests.live_simulation_test --project="your-project" --interconnect="your-ic"
+# Or via environment variables (CI/CD Fallback):
+#   LIVE_TEST_PROJECT="your-project" LIVE_TEST_INTERCONNECT="your-ic" python3 -m tests.live_simulation_test
 
 class LiveMaintenanceSimulationTest(unittest.TestCase):
+    target_project_id = None
+    target_interconnect_name = None
+    enable_real_writes = False
+    enforce_no_op = False
 
     def setUp(self):
-        self.project_id = os.environ.get("LIVE_TEST_PROJECT")
-        self.target_ic_name = os.environ.get("LIVE_TEST_INTERCONNECT")
+        self.project_id = self.target_project_id or os.environ.get("LIVE_TEST_PROJECT")
+        self.target_ic_name = self.target_interconnect_name or os.environ.get("LIVE_TEST_INTERCONNECT")
+        self.enable_writes = self.enable_real_writes or (os.environ.get("LIVE_TEST_ENABLE_WRITES") == "1")
         self.config = main.OrchestratorConfig()
+        if self.enforce_no_op or (os.environ.get("NO_OP_POLICIES") == "1"):
+            self.config.no_op_policies = True
         
         if not self.project_id or not self.target_ic_name:
-            self.skipTest("LIVE_TEST_PROJECT and LIVE_TEST_INTERCONNECT env vars must be set to run this live simulation.")
+            self.skipTest("Target project and interconnect link must be specified via CLI flags or environment variables to run live simulation.")
 
     def test_live_simulation(self):
-        enable_writes = os.environ.get("LIVE_TEST_ENABLE_WRITES") == "1"
-        if enable_writes:
+        if self.enable_writes:
             self.run_live_simulation_with_writes()
         else:
             self.run_live_simulation_read_only()
@@ -202,4 +210,21 @@ class LiveMaintenanceSimulationTest(unittest.TestCase):
                                 self.assertNotIn(self.config.export_policy_name, peer.export_policies)
 
 if __name__ == '__main__':
-    unittest.main()
+    import argparse
+    parser = argparse.ArgumentParser(description="Live GCP read-only simulation or write verification test")
+    parser.add_argument("--project", default="", help="Target GCP Project ID")
+    parser.add_argument("--interconnect", default="", help="Target physical Dedicated Interconnect link name")
+    parser.add_argument("--enable-writes", action="store_true", help="Enable actual policy creation and BGP peer session writes on live GCP resources")
+    parser.add_argument("--no-op-policies", action="store_true", help="Deploy non-disruptive nextPolicy() BGP rules when real writes are enabled")
+    args, remaining = parser.parse_known_args()
+    
+    if args.project:
+        LiveMaintenanceSimulationTest.target_project_id = args.project
+    if args.interconnect:
+        LiveMaintenanceSimulationTest.target_interconnect_name = args.interconnect
+    if args.enable_writes:
+        LiveMaintenanceSimulationTest.enable_real_writes = args.enable_writes
+    if args.no_op_policies:
+        LiveMaintenanceSimulationTest.enforce_no_op = args.no_op_policies
+        
+    unittest.main(argv=[sys.argv[0]] + remaining)
