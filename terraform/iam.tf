@@ -42,6 +42,7 @@ resource "google_project_iam_custom_role" "router_policy_editor_proj" {
     "compute.routers.get",
     "compute.routers.update",
     "compute.routers.updateRoutePolicy",
+    "compute.routers.deleteRoutePolicy",
   ]
 }
 
@@ -74,6 +75,7 @@ resource "google_organization_iam_custom_role" "router_policy_editor_org" {
     "compute.routers.get",
     "compute.routers.update",
     "compute.routers.updateRoutePolicy",
+    "compute.routers.deleteRoutePolicy",
   ]
 }
 
