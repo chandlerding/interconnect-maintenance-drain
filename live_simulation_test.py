@@ -30,12 +30,17 @@ class LiveMaintenanceSimulationTest(unittest.TestCase):
     def run_live_simulation_read_only(self):
         """Reads real topology from GCP, injects fake outage on target IC, and verifies planned writes."""
         
-        # 1. Setup Read-Only Routers Client with Mock Writes
-        real_routers_client = compute_v1.RoutersClient()
+        # 1. Setup Read-Only Routers Client Factory with Shared Mock Writes
         mock_op = MagicMock()
-        real_routers_client.update_route_policy = MagicMock(return_value=mock_op)
-        real_routers_client.patch = MagicMock(return_value=mock_op)
-        real_routers_client.list_route_policies = MagicMock(return_value=[])
+        shared_update_mock = MagicMock(return_value=mock_op)
+        shared_patch_mock = MagicMock(return_value=mock_op)
+        
+        def routers_client_factory():
+            client = compute_v1.RoutersClient()
+            client.update_route_policy = shared_update_mock
+            client.patch = shared_patch_mock
+            client.list_route_policies = MagicMock(return_value=[])
+            return client
 
         # 2. Setup Hybrid Interconnect Lister to inject outage
         real_ic_client = compute_v1.InterconnectsClient()
@@ -66,16 +71,16 @@ class LiveMaintenanceSimulationTest(unittest.TestCase):
             config=self.config,
             interconnects_client=hybrid_ic_client,
             attachments_client=compute_v1.InterconnectAttachmentsClient(),
-            routers_client=real_routers_client
+            routers_client=routers_client_factory
         )
         orchestrator.process_maintenance_events(target_projects=self.project_id)
 
         self.assertTrue(target_found, f"Target Interconnect '{self.target_ic_name}' not found in project '{self.project_id}'")
 
         # 3. Verifications of Planned Writes
-        if real_routers_client.patch.called:
+        if shared_patch_mock.called:
             print("\n[Live Sim] Verification: Patching WOULD have occurred for the following routers:")
-            for call_args in real_routers_client.patch.call_args_list:
+            for call_args in shared_patch_mock.call_args_list:
                 kwargs = call_args[1]
                 router_name = kwargs.get('router')
                 patched_router = kwargs.get('router_resource')
