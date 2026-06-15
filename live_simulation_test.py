@@ -70,7 +70,7 @@ class LiveMaintenanceSimulationTest(unittest.TestCase):
         orchestrator = main.MaintenanceOrchestrator(
             config=self.config,
             interconnects_client=hybrid_ic_client,
-            attachments_client=compute_v1.InterconnectAttachmentsClient(),
+            attachments_client=compute_v1.InterconnectAttachmentsClient,
             routers_client=routers_client_factory
         )
         orchestrator.process_maintenance_events(target_projects=self.project_id)

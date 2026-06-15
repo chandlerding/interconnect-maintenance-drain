@@ -6,11 +6,11 @@ import random
 import threading
 import types
 from datetime import datetime, timezone, timedelta
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from google.cloud import compute_v1
 from google.api_core import exceptions as gcp_exceptions
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Tuple, Callable, Any
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
 
@@ -63,32 +63,59 @@ class RouterReconciliationPlan:
     peer_targets: List[BgpPeerTarget]
 
 class MaintenanceOrchestrator:
-    """Main orchestrator class containing core alignment logic, decoupling dependencies."""
+    """Main orchestrator class containing core alignment logic, decoupling dependencies and enabling highly scalable multi-threaded discovery."""
     def __init__(
         self, 
         config: OrchestratorConfig,
-        interconnects_client: compute_v1.InterconnectsClient = None,
-        attachments_client: compute_v1.InterconnectAttachmentsClient = None,
+        interconnects_client = None,
+        attachments_client = None,
         routers_client = None
     ):
         self.config = config
-        self.interconnects_client = interconnects_client or compute_v1.InterconnectsClient()
-        self.attachments_client = attachments_client or compute_v1.InterconnectAttachmentsClient()
         
-        if routers_client is None:
-            self._routers_client_factory = compute_v1.RoutersClient
-        elif isinstance(routers_client, (type, types.FunctionType)):
-            self._routers_client_factory = routers_client
-        else:
-            self._routers_client_factory = lambda: routers_client
+        def make_factory(client_arg, default_class):
+            if client_arg is None:
+                return default_class
+            if isinstance(client_arg, (type, types.FunctionType)):
+                return client_arg
+            return lambda: client_arg
             
+        self._ic_factory = make_factory(interconnects_client, compute_v1.InterconnectsClient)
+        self._attach_factory = make_factory(attachments_client, compute_v1.InterconnectAttachmentsClient)
+        self._router_factory = make_factory(routers_client, compute_v1.RoutersClient)
+        
         self._thread_local = threading.local()
 
     @property
-    def routers_client(self):
-        if not hasattr(self._thread_local, "client"):
-            self._thread_local.client = self._routers_client_factory()
-        return self._thread_local.client
+    def interconnects_client(self) -> compute_v1.InterconnectsClient:
+        if not hasattr(self._thread_local, "ic_client"):
+            self._thread_local.ic_client = self._ic_factory()
+        return self._thread_local.ic_client
+
+    @property
+    def attachments_client(self) -> compute_v1.InterconnectAttachmentsClient:
+        if not hasattr(self._thread_local, "attach_client"):
+            self._thread_local.attach_client = self._attach_factory()
+        return self._thread_local.attach_client
+
+    @property
+    def routers_client(self) -> compute_v1.RoutersClient:
+        if not hasattr(self._thread_local, "router_client"):
+            self._thread_local.router_client = self._router_factory()
+        return self._thread_local.router_client
+
+    def _execute_with_retry(self, fn: Callable, *args, **kwargs) -> Any:
+        """Executes a Google Cloud API call with standardized exponential backoff and randomized jitter."""
+        max_attempts = 5
+        for attempt in range(max_attempts):
+            try:
+                return fn(*args, **kwargs)
+            except (gcp_exceptions.TooManyRequests, gcp_exceptions.InternalServerError, gcp_exceptions.ServiceUnavailable, gcp_exceptions.PreconditionFailed) as e:
+                if attempt >= max_attempts - 1:
+                    raise RuntimeError(f"API operation exhausted after {max_attempts} retries. Final error: {e}") from e
+                sleep_duration = (2 ** attempt) + random.uniform(0.1, 1.0)
+                logging.warning(f"Transient GCP API concurrency error: {e}. Retrying in {sleep_duration:.2f}s (Attempt {attempt + 1}/{max_attempts})...")
+                time.sleep(sleep_duration)
 
     def process_maintenance_events(self, target_projects: str = ""):
         logging.info(f"Maintenance Events Check Loop Started at {datetime.now(timezone.utc).isoformat()}")
@@ -124,7 +151,8 @@ class MaintenanceOrchestrator:
         logging.info(f"Auditing Interconnect: '{ic_name}' [Project: {project_id}]")
 
         outages = list(ic.expected_outages) if ic.expected_outages else []
-        logging.info(f"Found {len(outages)} planned outage notifications scheduled for '{ic_name}'")
+        if outages:
+             logging.info(f"Found {len(outages)} planned outage notifications scheduled for '{ic_name}'")
 
         now = datetime.now(timezone.utc)
         active_outages = []
@@ -201,7 +229,9 @@ class MaintenanceOrchestrator:
         for attach_url in attachments:
             try:
                  proj, region, name = parse_attachment_url(attach_url)
-                 attach_data = self.attachments_client.get(project=proj, region=region, interconnect_attachment=name)
+                 attach_data = self._execute_with_retry(
+                     self.attachments_client.get, project=proj, region=region, interconnect_attachment=name
+                 )
                  router_url = attach_data.router
                  if not router_url:
                       logging.warning(f"VLAN attachment {name} has no associated Cloud Router. Skipping.")
@@ -211,7 +241,9 @@ class MaintenanceOrchestrator:
                  
                  cache_key = (proj, region, router_name)
                  if cache_key not in router_cache:
-                      router = self.routers_client.get(project=proj, region=region, router=router_name)
+                      router = self._execute_with_retry(
+                          self.routers_client.get, project=proj, region=region, router=router_name
+                      )
                       router_cache[cache_key] = router
                  router = router_cache[cache_key]
                  
@@ -276,11 +308,15 @@ class MaintenanceOrchestrator:
         
         while attempt < max_attempts:
              try:
-                  router = self.routers_client.get(project=proj, region=region, router=router_name)
+                  router = self._execute_with_retry(
+                      self.routers_client.get, project=proj, region=region, router=router_name
+                  )
                   policies_patched = self.ensure_drain_policies_exist(proj, region, router)
                   
                   if policies_patched:
-                       router = self.routers_client.get(project=proj, region=region, router=router_name)
+                       router = self._execute_with_retry(
+                           self.routers_client.get, project=proj, region=region, router=router_name
+                       )
                   
                   for mod in peer_mods:
                        for peer in router.bgp_peers:
@@ -292,7 +328,8 @@ class MaintenanceOrchestrator:
                                       self.toggle_drain_policies(peer, enable_drain=False)
                                       logging.info(f"Thread stripping Drain Route Policies from BGP peer '{mod.peer_name}' on Router '{router_name}'")
 
-                  operation = self.routers_client.patch(
+                  operation = self._execute_with_retry(
+                      self.routers_client.patch,
                       project=proj,
                       region=region,
                       router=router_name,
@@ -306,12 +343,12 @@ class MaintenanceOrchestrator:
              except (gcp_exceptions.PreconditionFailed, gcp_exceptions.TooManyRequests, gcp_exceptions.InternalServerError) as e:
                   attempt += 1
                   sleep_duration = (2 ** attempt) + random.uniform(0.1, 1.0)
-                  logging.warning(f"Transient or concurrency error on attempt {attempt}: {e}. Retrying in {sleep_duration:.2f}s...")
+                  logging.warning(f"Transient write error on attempt {attempt}: {e}. Retrying in {sleep_duration:.2f}s...")
                   if attempt >= max_attempts:
                        raise RuntimeError(f"Unable to reconcile patch updates on Router {router_name} after {max_attempts} attempts. Error: {e}")
                   time.sleep(sleep_duration)
              except gcp_exceptions.Forbidden as e:
-                  raise RuntimeError(f"CRITICAL: IAM PERMISSION DENIED patching Cloud Router '{router_name}' [Project: {proj}]. Missing 'compute.routers.update' on the target resource. Details: {e}") from e
+                  raise RuntimeError(f"CRITICAL: IAM PERMISSION DENIED patching Cloud Router '{router_name}' [Project: {proj}]. Details: {e}") from e
              except Exception as e:
                   raise RuntimeError(f"CRITICAL: Non-retryable error applying patch to Router {router_name}: {e}")
 
@@ -369,7 +406,8 @@ class MaintenanceOrchestrator:
                 policy_resource.fingerprint = "" 
 
             try:
-                operation = self.routers_client.update_route_policy(
+                operation = self._execute_with_retry(
+                    self.routers_client.update_route_policy,
                     project=project_id,
                     region=region,
                     router=router_name,
@@ -395,7 +433,9 @@ class MaintenanceOrchestrator:
         logging.info(f"Reconciling route policies for router '{router.name}'. Expected import actions: {expected_import_actions}, export actions: {expected_export_actions}")
 
         try:
-            existing_policies = list(self.routers_client.list_route_policies(project=project_id, region=region, router=router.name))
+            existing_policies = list(self._execute_with_retry(
+                self.routers_client.list_route_policies, project=project_id, region=region, router=router.name
+            ))
         except Exception as e:
             logging.error(f"Error listing route policies for router {router.name}: {e}")
             raise
@@ -409,7 +449,7 @@ class MaintenanceOrchestrator:
         return import_patched or export_patched
 
     def _audit_projects(self, project_list: list) -> Tuple[List[InterconnectAuditResult], set]:
-        """Audits targeted GCP projects and collects pure Interconnect and BGP peer audit results."""
+        """Audits targeted GCP projects with extremely fast multi-threaded Interconnect discovery."""
         run_summary = []
         router_cache = {}
         failed_projects = set()
@@ -417,32 +457,38 @@ class MaintenanceOrchestrator:
         for project_id in project_list:
             logging.info(f"Scanning physical Interconnect resources under Project '{project_id}'")
             try:
-                interconnects = list(self.interconnects_client.list(project=project_id))
-                logging.info(f"Discovered {len(interconnects)} physical links inside project '{project_id}'")
+                interconnects = list(self._execute_with_retry(self.interconnects_client.list, project=project_id))
+                logging.info(f"Discovered {len(interconnects)} physical links inside project '{project_id}'. Launching multi-threaded discovery audits (Max 10 workers)...")
                 
-                for ic in interconnects:
-                    try:
-                         record, peer_targets = self.process_interconnect_maintenance_events(
-                             project_id, ic, router_cache
-                         )
-                         record._peer_targets = peer_targets 
-                         run_summary.append(record)
-                    except gcp_exceptions.Forbidden as e:
-                         error_details = f"CRITICAL: IAM PERMISSION DENIED processing physical link '{ic.name}' under project '{project_id}'. Details: {e}"
-                         logging.error(error_details, exc_info=True)
-                         run_summary.append(InterconnectAuditResult(
-                             project_id=project_id, interconnect=ic.name, outage_id="UNKNOWN",
-                             target_state="UNKNOWN", current_state="UNKNOWN", action="ERROR", status="FAILED: IAM_PERMISSION_DENIED"
-                         ))
-                         failed_projects.add(project_id)
-                    except Exception as e:
-                         error_details = f"CRITICAL: Maintenance events processing failure on link '{ic.name}' under project '{project_id}': {str(e)}"
-                         logging.error(error_details, exc_info=True)
-                         run_summary.append(InterconnectAuditResult(
-                             project_id=project_id, interconnect=ic.name, outage_id="UNKNOWN",
-                             target_state="UNKNOWN", current_state="UNKNOWN", action="ERROR", status=f"FAILED: {str(e)[:500]}"
-                         ))
-                         failed_projects.add(project_id)
+                with ThreadPoolExecutor(max_workers=10) as executor:
+                     future_to_ic = {
+                         executor.submit(
+                             self.process_interconnect_maintenance_events, project_id, ic, router_cache
+                         ): ic for ic in interconnects
+                     }
+                     
+                     for future in as_completed(future_to_ic):
+                         ic_obj = future_to_ic[future]
+                         try:
+                             record, peer_targets = future.result()
+                             record._peer_targets = peer_targets
+                             run_summary.append(record)
+                         except gcp_exceptions.Forbidden as e:
+                             error_details = f"CRITICAL: IAM PERMISSION DENIED processing physical link '{ic_obj.name}' under project '{project_id}'. Details: {e}"
+                             logging.error(error_details, exc_info=True)
+                             run_summary.append(InterconnectAuditResult(
+                                 project_id=project_id, interconnect=ic_obj.name, outage_id="UNKNOWN",
+                                 target_state="UNKNOWN", current_state="UNKNOWN", action="ERROR", status="FAILED: IAM_PERMISSION_DENIED"
+                             ))
+                             failed_projects.add(project_id)
+                         except Exception as e:
+                             error_details = f"CRITICAL: Maintenance events processing failure on link '{ic_obj.name}' under project '{project_id}': {str(e)}"
+                             logging.error(error_details, exc_info=True)
+                             run_summary.append(InterconnectAuditResult(
+                                 project_id=project_id, interconnect=ic_obj.name, outage_id="UNKNOWN",
+                                 target_state="UNKNOWN", current_state="UNKNOWN", action="ERROR", status=f"FAILED: {str(e)[:500]}"
+                             ))
+                             failed_projects.add(project_id)
                           
             except gcp_exceptions.Forbidden as e:
                 error_details = f"CRITICAL: IAM PERMISSION DENIED listing project '{project_id}'. Details: {e}"
