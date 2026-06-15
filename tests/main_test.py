@@ -146,7 +146,7 @@ class TestProcessMaintenanceEvents(unittest.TestCase):
     @patch.object(main.MaintenanceOrchestrator, '_create_reconciliation_plans')
     @patch.object(main.MaintenanceOrchestrator, '_align_routers_parallel')
     @patch.object(main.MaintenanceOrchestrator, '_update_final_statuses')
-    @patch('src.main.log_sre_summary_table')
+    @patch('src.orchestrator.log_sre_summary_table')
     def test_process_success(self, mock_log, mock_update, mock_align, mock_create, mock_audit):
         mock_audit.return_value = ([], set())
         mock_create.return_value = []
@@ -261,6 +261,142 @@ class TestProcessInterconnectMaintenanceEvents(unittest.TestCase):
         record, peer_targets = self.orchestrator.process_interconnect_maintenance_events("p1", mock_ic, {})
 
         self.assertEqual(record.target_state, "NORMAL")
+
+class TestRoutePolicyCleanup(unittest.TestCase):
+    def setUp(self):
+        self.config = main.OrchestratorConfig()
+        self.mock_ic_client = MagicMock()
+        self.mock_attach_client = MagicMock()
+        self.mock_router_client = MagicMock()
+        
+        self.orchestrator = main.MaintenanceOrchestrator(
+            config=self.config,
+            interconnects_client=self.mock_ic_client,
+            attachments_client=self.mock_attach_client,
+            routers_client=self.mock_router_client
+        )
+
+    def test_cleanup_route_policies(self):
+        mock_ic = compute_v1.Interconnect(
+            name="ic-cleanup",
+            interconnect_attachments=["/projects/p1/regions/r1/interconnectAttachments/at1"]
+        )
+        self.mock_ic_client.list.return_value = [mock_ic]
+        
+        mock_attach = compute_v1.InterconnectAttachment(
+            name="at1",
+            router="https://www.googleapis.com/compute/v1/projects/p1/regions/r1/routers/rt1"
+        )
+        self.mock_attach_client.get.return_value = mock_attach
+
+        mock_interface = compute_v1.RouterInterface(
+            name="if1",
+            linked_interconnect_attachment="https://www.googleapis.com/compute/v1/projects/p1/regions/r1/interconnectAttachments/at1"
+        )
+        mock_peer = compute_v1.RouterBgpPeer(
+            name="peer1",
+            interface_name="if1",
+            import_policies=[self.config.import_policy_name],
+            export_policies=[self.config.export_policy_name]
+        )
+        mock_router = compute_v1.Router(
+            name="rt1",
+            interfaces=[mock_interface],
+            bgp_peers=[mock_peer]
+        )
+        self.mock_router_client.get.return_value = mock_router
+        
+        mock_import_policy = compute_v1.RoutePolicy(name=self.config.import_policy_name)
+        mock_export_policy = compute_v1.RoutePolicy(name=self.config.export_policy_name)
+        self.mock_router_client.list_route_policies.return_value = [
+            mock_import_policy, mock_export_policy
+        ]
+
+        results = self.orchestrator.cleanup_route_policies("p1")
+
+        self.assertEqual(results, {("p1", "r1", "rt1"): {"success": True, "error": None}})
+        
+        self.mock_router_client.patch.assert_called()
+        patched_router = self.mock_router_client.patch.call_args[1]["router_resource"]
+        self.assertEqual(list(patched_router.bgp_peers[0].import_policies), [])
+        self.assertEqual(list(patched_router.bgp_peers[0].export_policies), [])
+
+        self.assertEqual(self.mock_router_client.delete_route_policy.call_count, 2)
+
+class TestManualOverride(unittest.TestCase):
+    def setUp(self):
+        self.config = main.OrchestratorConfig()
+        self.mock_ic_client = MagicMock()
+        self.mock_attach_client = MagicMock()
+        self.mock_router_client = MagicMock()
+        
+        self.orchestrator = main.MaintenanceOrchestrator(
+            config=self.config,
+            interconnects_client=self.mock_ic_client,
+            attachments_client=self.mock_attach_client,
+            routers_client=self.mock_router_client
+        )
+
+    def _setup_mock_link(self):
+        mock_ic = compute_v1.Interconnect(
+            name="ic-override",
+            interconnect_attachments=["/projects/p1/regions/r1/interconnectAttachments/at1"]
+        )
+        self.mock_ic_client.list.return_value = [mock_ic]
+        
+        mock_attach = compute_v1.InterconnectAttachment(
+            name="at1",
+            router="https://www.googleapis.com/compute/v1/projects/p1/regions/r1/routers/rt1"
+        )
+        self.mock_attach_client.get.return_value = mock_attach
+
+        mock_interface = compute_v1.RouterInterface(
+            name="if1",
+            linked_interconnect_attachment="https://www.googleapis.com/compute/v1/projects/p1/regions/r1/interconnectAttachments/at1"
+        )
+        mock_peer = compute_v1.RouterBgpPeer(
+            name="peer1",
+            interface_name="if1",
+            import_policies=[],
+            export_policies=[]
+        )
+        mock_router = compute_v1.Router(
+            name="rt1",
+            bgp=compute_v1.RouterBgp(asn=65001),
+            interfaces=[mock_interface],
+            bgp_peers=[mock_peer]
+        )
+        self.mock_router_client.get.return_value = mock_router
+        self.mock_router_client.list_route_policies.return_value = []
+
+    def test_manual_drain(self):
+        self._setup_mock_link()
+        
+        self.orchestrator.manual_override_interconnect(
+            target_ic_name="ic-override", enforce_drain=True, target_projects="p1"
+        )
+        
+        self.mock_router_client.patch.assert_called()
+        patched_router = self.mock_router_client.patch.call_args[1]["router_resource"]
+        self.assertEqual(list(patched_router.bgp_peers[0].import_policies), [self.config.import_policy_name])
+        self.assertEqual(list(patched_router.bgp_peers[0].export_policies), [self.config.export_policy_name])
+
+    def test_manual_undrain(self):
+        self._setup_mock_link()
+        
+        # Override initial peer state to represent an already drained peer
+        mock_router = self.mock_router_client.get.return_value
+        mock_router.bgp_peers[0].import_policies.append(self.config.import_policy_name)
+        mock_router.bgp_peers[0].export_policies.append(self.config.export_policy_name)
+        
+        self.orchestrator.manual_override_interconnect(
+            target_ic_name="ic-override", enforce_drain=False, target_projects="p1"
+        )
+        
+        self.mock_router_client.patch.assert_called()
+        patched_router = self.mock_router_client.patch.call_args[1]["router_resource"]
+        self.assertEqual(list(patched_router.bgp_peers[0].import_policies), [])
+        self.assertEqual(list(patched_router.bgp_peers[0].export_policies), [])
 
 if __name__ == "__main__":
     unittest.main()
