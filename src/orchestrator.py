@@ -656,40 +656,68 @@ class MaintenanceOrchestrator:
         return cleanup_results
 
     def manual_override_interconnect(self, target_ic_name: str, enforce_drain: bool, target_projects: str = ""):
+        ic_list = list(dict.fromkeys(i.strip() for i in target_ic_name.split(",") if i.strip()))
+        if len(ic_list) > 1:
+            for ic in ic_list:
+                self.manual_override_interconnect(ic, enforce_drain, target_projects)
+            return
+
         target_state = "DRAINED" if enforce_drain else "NORMAL"
         override_type = "MANUAL_DRAIN" if enforce_drain else "MANUAL_UNDRAIN"
         logging.info(f"Manual Interconnect Override ({override_type}) initiated for link '{target_ic_name}' at {datetime.now(timezone.utc).isoformat()}")
         
-        projects_to_use = target_projects if target_projects else self.config.projects
+        # Parse potential project-scoped syntax: 'projects/proj/global/interconnects/name' or 'proj/name'
+        explicit_proj = None
+        clean_ic_name = target_ic_name
+        
+        if "/interconnects/" in target_ic_name:
+             parts = target_ic_name.split("/")
+             try:
+                 p_idx = parts.index("projects")
+                 explicit_proj = parts[p_idx + 1]
+                 clean_ic_name = parts[-1]
+             except (ValueError, IndexError):
+                 pass
+        elif "/" in target_ic_name:
+             parts = target_ic_name.split("/")
+             if len(parts) == 2:
+                  explicit_proj, clean_ic_name = parts[0], parts[1]
+
+        scoped_projs = target_projects if target_projects else self.config.projects
+        projects_to_use = explicit_proj if explicit_proj else scoped_projs
         if not projects_to_use:
             raise ValueError("No target projects specified to locate the target interconnect.")
 
         project_list = list(dict.fromkeys(p.strip() for p in projects_to_use.split(",") if p.strip()))
-        logging.info(f"Scanning project list {project_list} to locate Target Interconnect '{target_ic_name}'...")
+        logging.info(f"Scanning project list {project_list} to locate Target Interconnect '{clean_ic_name}'...")
         
+        matched_ics = []
         router_cache = {}
-        target_ic = None
-        target_proj = None
         
         for proj in project_list:
             try:
                 ics = list(self._execute_with_retry(self.interconnects_client.list, project=proj))
                 for ic in ics:
-                    if ic.name == target_ic_name:
-                        target_ic = ic
-                        target_proj = proj
+                    if ic.name == clean_ic_name:
+                        matched_ics.append((proj, ic))
                         break
             except gcp_exceptions.Forbidden:
                 logging.warning(f"IAM Permission Denied inspecting project '{proj}'. Skipping.")
-            if target_ic:
-                break
                 
-        if not target_ic:
-            error_msg = f"CRITICAL: Target Interconnect '{target_ic_name}' not found across any scanned projects {project_list}."
+        if not matched_ics:
+            error_msg = f"CRITICAL: Target Interconnect '{clean_ic_name}' not found across any scanned projects {project_list}."
             logging.error(error_msg)
             raise ValueError(error_msg)
             
-        logging.info(f"Successfully located Target Interconnect '{target_ic_name}' inside Project '{target_proj}'. Identifying attached VLAN circuits...")
+        if len(matched_ics) > 1:
+            ambiguous_projs = [p for p, _ in matched_ics]
+            error_msg = f"Ambiguous interconnect name '{clean_ic_name}'. Found in multiple distinct projects: {ambiguous_projs}. To prevent unexpected cross-project routing alterations, please specify explicitly using 'project_id/interconnect_name' syntax."
+            logging.error(error_msg)
+            raise ValueError(error_msg)
+            
+        target_proj, target_ic = matched_ics[0]
+        
+        logging.info(f"Successfully located Target Interconnect '{clean_ic_name}' inside Project '{target_proj}'. Identifying attached VLAN circuits...")
         
         attachments = list(target_ic.interconnect_attachments) if target_ic.interconnect_attachments else []
         if not attachments:

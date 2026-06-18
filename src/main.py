@@ -16,11 +16,13 @@ except ImportError:
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
 
-def process_maintenance_events(target_projects: str = "", no_op_policies: bool = False):
+def process_maintenance_events(target_projects: str = "", no_op_policies: bool = False, lead_time_minutes: int = None):
     """Top-level execution wrapper for backward compatibility."""
     config = OrchestratorConfig()
     if no_op_policies:
         config.no_op_policies = True
+    if lead_time_minutes is not None:
+        config.lead_time_minutes = lead_time_minutes
     orchestrator = MaintenanceOrchestrator(config)
     orchestrator.process_maintenance_events(target_projects)
 
@@ -30,11 +32,13 @@ def cleanup_all_route_policies(target_projects: str = ""):
     orchestrator = MaintenanceOrchestrator(config)
     orchestrator.cleanup_route_policies(target_projects)
 
-def execute_manual_override(interconnect_name: str, enforce_drain: bool, target_projects: str = "", no_op_policies: bool = False):
+def execute_manual_override(interconnect_name: str, enforce_drain: bool, target_projects: str = "", no_op_policies: bool = False, lead_time_minutes: int = None):
     """Top-level execution wrapper for emergency manual interconnect override feature."""
     config = OrchestratorConfig()
     if no_op_policies:
         config.no_op_policies = True
+    if lead_time_minutes is not None:
+        config.lead_time_minutes = lead_time_minutes
     orchestrator = MaintenanceOrchestrator(config)
     orchestrator.manual_override_interconnect(interconnect_name, enforce_drain, target_projects)
 
@@ -43,6 +47,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Drain/undrain Interconnect connections before/after maintenance events, by applying bgp routing policy on affected bgp sessions")
     parser.add_argument(
         "--projects",
+        "--project",
+        dest="projects",
         default="",
         help="Optional: Comma-separated list of GCP Project IDs to scan. If omitted, falls back to config.projects."
     )
@@ -58,8 +64,10 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--interconnect",
+        "--interconnects",
+        dest="interconnect",
         default="",
-        help="Optional: Target a specific Interconnect link by exact name for manual override operations."
+        help="Optional: Target specific Interconnect link(s) by exact name for manual override operations."
     )
     parser.add_argument(
         "--manual-drain",
@@ -70,6 +78,12 @@ if __name__ == "__main__":
         "--manual-undrain",
         action="store_true",
         help="Optional: Enforce an immediate NORMAL (restored) state on the specified --interconnect, bypassing maintenance event notifications."
+    )
+    parser.add_argument(
+        "--lead-time-minutes",
+        type=int,
+        default=None,
+        help="Optional: Lead time in minutes before maintenance to start draining. Overrides DRAIN_LEAD_TIME_MINUTES env var."
     )
     args = parser.parse_args()
     
@@ -85,10 +99,12 @@ if __name__ == "__main__":
             interconnect_name=args.interconnect, 
             enforce_drain=args.manual_drain, 
             target_projects=args.projects,
-            no_op_policies=args.no_op_policies
+            no_op_policies=args.no_op_policies,
+            lead_time_minutes=args.lead_time_minutes
         )
     else:
         process_maintenance_events(
             target_projects=args.projects,
-            no_op_policies=args.no_op_policies
+            no_op_policies=args.no_op_policies,
+            lead_time_minutes=args.lead_time_minutes
         )

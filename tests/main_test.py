@@ -398,5 +398,65 @@ class TestManualOverride(unittest.TestCase):
         self.assertEqual(list(patched_router.bgp_peers[0].import_policies), [])
         self.assertEqual(list(patched_router.bgp_peers[0].export_policies), [])
 
+    def test_manual_override_explicit_project_syntax(self):
+        self._setup_mock_link()
+        self.config.projects = "p-other,p1" # Broad background projects
+        
+        # Test compact Project Scoping syntax 'p1/ic-override'
+        self.orchestrator.manual_override_interconnect(
+            target_ic_name="p1/ic-override", enforce_drain=True
+        )
+        self.mock_router_client.patch.assert_called()
+
+    def test_manual_override_ambiguity_error(self):
+        self._setup_mock_link()
+        self.config.projects = "p1,p2"
+        # Mocks returning the same link name for both p1 and p2
+        self.mock_ic_client.list.return_value = [
+            compute_v1.Interconnect(name="ic-override")
+        ]
+        
+        with self.assertRaises(ValueError) as ctx:
+            self.orchestrator.manual_override_interconnect(
+                target_ic_name="ic-override", enforce_drain=True
+            )
+        self.assertIn("Ambiguous interconnect name", str(ctx.exception))
+
+    def test_manual_override_deduce_target_project_freely(self):
+        self._setup_mock_link()
+        self.config.projects = "p-walled-garden"
+        
+        # Should flawlessly deduce 'p1' and bypass 'p-walled-garden' entirely
+        self.orchestrator.manual_override_interconnect(
+            target_ic_name="p1/ic-override", enforce_drain=True
+        )
+        self.mock_router_client.patch.assert_called()
+
+class TestMainEntrypoints(unittest.TestCase):
+
+    @patch('src.main.MaintenanceOrchestrator')
+    def test_process_maintenance_events_passes_lead_time(self, mock_orchestrator_class):
+        mock_orch_instance = MagicMock()
+        mock_orchestrator_class.return_value = mock_orch_instance
+        
+        main.process_maintenance_events(lead_time_minutes=120)
+        
+        mock_orchestrator_class.assert_called_once()
+        config_passed = mock_orchestrator_class.call_args[0][0]
+        self.assertEqual(config_passed.lead_time_minutes, 120)
+        mock_orch_instance.process_maintenance_events.assert_called_once()
+
+    @patch('src.main.MaintenanceOrchestrator')
+    def test_execute_manual_override_passes_lead_time(self, mock_orchestrator_class):
+        mock_orch_instance = MagicMock()
+        mock_orchestrator_class.return_value = mock_orch_instance
+        
+        main.execute_manual_override(interconnect_name="ic", enforce_drain=True, lead_time_minutes=120)
+        
+        mock_orchestrator_class.assert_called_once()
+        config_passed = mock_orchestrator_class.call_args[0][0]
+        self.assertEqual(config_passed.lead_time_minutes, 120)
+        mock_orch_instance.manual_override_interconnect.assert_called_once_with("ic", True, "")
+
 if __name__ == "__main__":
     unittest.main()

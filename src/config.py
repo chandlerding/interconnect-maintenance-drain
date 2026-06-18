@@ -4,7 +4,7 @@ from typing import List, Tuple
 
 @dataclass
 class OrchestratorConfig:
-    """Centralized configuration loaded from the environment."""
+    """Centralized configuration loaded from environment variables with CLI overrides."""
     projects: str = field(default_factory=lambda: os.environ.get("INTERCONNECT_PROJECTS", ""))
     lead_time_minutes: int = field(default_factory=lambda: int(os.environ.get("DRAIN_LEAD_TIME_MINUTES", "60")))
     no_op_policies: bool = field(default_factory=lambda: os.environ.get("NO_OP_POLICIES") == "1")

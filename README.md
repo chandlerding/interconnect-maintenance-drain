@@ -44,21 +44,24 @@ It mitigates packet loss and minimizes downtime during GCP-initiated maintenance
 ### Dynamic Maintenance Automation (Standard Mode)
 Run the automated discovery engine against your configured or specified GCP projects:
 ```bash
-# Standard live execution:
+# Standard live execution (supports --project or --projects):
 python3 src/main.py --projects="your-production-project,your-staging-project"
 
+# Override default lead time (e.g., to 120 minutes):
+python3 src/main.py --project="your-production-project" --lead-time-minutes=120
+
 # Safe non-disruptive validation (deploy transparent nextPolicy() rules):
-python3 src/main.py --projects="your-production-project" --no-op-policies
+python3 src/main.py --project="your-production-project" --no-op-policies
 ```
 
 ### Emergency Incident Response (Manual Overrides)
-Intervene during SRE incidents to force a network drain or un-drain on a specific link:
+Intervene during SRE incidents to force a network drain or un-drain on specific link(s) using project-scoped syntax (`project_id/interconnect_name`):
 ```bash
-# To force an immediate emergency maintenance DRAIN:
-python3 src/main.py --projects="your-production-project" --interconnect="your-interconnect-link-name" --manual-drain
+# To force an immediate DRAIN on specific link(s) (comma-separated):
+python3 src/main.py --interconnects="project-a/link-1,project-b/link-2" --manual-drain
 
 # To force an immediate live RESTORATION (un-drain):
-python3 src/main.py --projects="your-production-project" --interconnect="your-interconnect-link-name" --manual-undrain
+python3 src/main.py --interconnects="project-a/link-1" --manual-undrain
 ```
 
 ### Tool Un-installation (Policy Cleanup)
@@ -79,24 +82,28 @@ pip install -r src/requirements.txt
 ```
 
 ### 2. Executing the Test Suite
-All 27 testing suites across unit, integration, and live simulations can be run using Python's unified `unittest` runner:
+All 30 testing suites across unit, integration, and live simulations can be run using Python's unified `unittest` runner:
 ```bash
 python3 -m unittest discover -s tests -p "*_test.py"
 ```
 
 ### 3. Running Live Simulation Test Isolated
-This test runs the orchestrator against a real GCP project in a safe, read-only simulation mode, or optionally tests real writes.
+This test runs the orchestrator against a real GCP project in a safe, read-only simulation mode, or optionally tests real writes. It supports multi-link targets and project scoping.
 
 **Read-Only Simulation (Safe)**:
-Reads your real physical Interconnect topology from GCP, injects a memory outage on the target link, and asserts that our thread-local factories would have aligned the route policies correctly (without executing real writes).
+Reads your real physical Interconnect topology from GCP, injects a memory outage on the target link(s), and asserts that our thread-local factories would have aligned the route policies correctly (without executing real writes).
 ```bash
-python3 -m tests.live_simulation_test --project="your-project-id" --interconnect="your-interconnect-name"
+# Single target (deducing project automatically):
+python3 -m tests.live_simulation_test --interconnect="your-project-id/your-interconnect-name"
+
+# Multiple targets:
+python3 -m tests.live_simulation_test --interconnects="project-a/link-1,project-b/link-2"
 ```
 
 **Real-Write Validation (Warning: Modifies GCP Resources)**:
 Triggers actual API calls to create the policies, apply them to the router's BGP peers, verifies the state, and immediately rolls back the changes. To make this completely safe, include the `--no-op-policies` flag to write non-disruptive `nextPolicy()` rules.
 ```bash
-python3 -m tests.live_simulation_test --project="your-project-id" --interconnect="your-interconnect-name" --enable-writes --no-op-policies
+python3 -m tests.live_simulation_test --interconnect="your-project-id/your-interconnect-name" --enable-writes --no-op-policies
 ```
 
 ---
